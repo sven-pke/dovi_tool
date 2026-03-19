@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "dolby_vision", "av1_parser"]
+resolver = "2"
+
 [package]
 name = "dovi_tool"
 version = "2.3.1"
@@ -13,6 +17,7 @@ name = "dovi_tool"
 path = "src/main.rs"
 
 [dependencies]
+av1_parser = { path = "av1_parser" }
 dolby_vision = { path = "dolby_vision", "features" = ["xml", "serde"] }
 bitvec_helpers = { version = "4.0.1", default-features = false, features = ["bitstream-io"] }
 madvr_parse = "1.0.3"
