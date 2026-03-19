@@ -15,10 +15,9 @@ use dolby_vision::rpu::utils::parse_rpu_file;
 use crate::commands::InjectRpuArgs;
 
 use super::av1::{
-    IvfFrameHeader, Obu, OBU_TEMPORAL_DELIMITER,
+    IvfFrameHeader, IvfWriter, Obu, OBU_TEMPORAL_DELIMITER,
     build_dovi_obu, is_dovi_rpu_obu,
     try_read_ivf_file_header, read_ivf_frame_header, read_obus_from_ivf_frame,
-    write_ivf_frame_header,
 };
 use super::hdr10plus_utils::prefix_sei_removed_hdr10plus_nalu;
 use super::{CliOptions, DoviRpu, IoFormat, input_from_either};
@@ -40,24 +39,32 @@ fn inject_rpu_av1(input: &Path, rpu_in: &Path, output: &Path) -> Result<()> {
     let file = File::open(input)?;
     let mut reader = BufReader::with_capacity(100_000, file);
 
-    let out_file = File::create(output).expect("Can't create output file");
-    let mut writer = BufWriter::with_capacity(100_000, out_file);
-
     if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
-        writer.write_all(&ivf_header)?;
-        inject_ivf_av1(&mut reader, &mut writer, &rpus)?;
+        // IVF container — IvfWriter owns frame-level I/O (consistent with remover)
+        let out_file = BufWriter::with_capacity(
+            100_000,
+            File::create(output).expect("Can't create output file"),
+        );
+        let mut ivf_writer = IvfWriter::new(out_file, &ivf_header)?;
+        inject_ivf_av1(&mut reader, &mut ivf_writer, &rpus)?;
+        ivf_writer.flush()?;
     } else {
+        // Raw AV1 bitstream
+        let mut writer = BufWriter::with_capacity(
+            100_000,
+            File::create(output).expect("Can't create output file"),
+        );
         inject_raw_av1(&mut reader, &mut writer, &rpus)?;
+        writer.flush()?;
     }
 
     println!("Rewriting with interleaved RPU OBUs: Done.");
-    writer.flush()?;
     Ok(())
 }
 
 fn inject_ivf_av1<R: Read, W: Write>(
     reader: &mut R,
-    writer: &mut W,
+    ivf_writer: &mut IvfWriter<W>,
     rpus: &[DoviRpu],
 ) -> Result<()> {
     let total_rpus = rpus.len();
@@ -102,8 +109,7 @@ fn inject_ivf_av1<R: Read, W: Write>(
         };
 
         let output_frame = build_output_frame_av1(&obus, &encoded);
-        write_ivf_frame_header(writer, output_frame.len() as u32, fh.timestamp)?;
-        writer.write_all(&output_frame)?;
+        ivf_writer.write_frame(fh.timestamp, &output_frame)?;
 
         tu_index += 1;
     }
