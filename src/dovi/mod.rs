@@ -62,8 +62,8 @@ pub fn convert_rpu_with_opts(opts: &CliOptions, rpu: &mut DoviRpu) -> Result<()>
 ///
 /// Each entry in `data` is the output of `write_hevc_unspec62_nalu()`:
 /// `[0x7C, 0x01, <RPU bytes>]`.
-/// This function writes them as 4-byte-start-code NAL units for compatibility
-/// with `parse_rpu_file` and other Dolby Vision tooling.
+/// `parse_rpu_file` expects `[0x00, 0x00, 0x00, 0x01, 0x19, ...]` — i.e. the
+/// 4-byte start code followed directly by the raw RPU payload (no 7C 01 header).
 pub fn write_rpu_file<P: AsRef<Path>>(output_path: P, data: Vec<Vec<u8>>) -> Result<()> {
     let mut writer = BufWriter::with_capacity(
         100_000,
@@ -71,9 +71,10 @@ pub fn write_rpu_file<P: AsRef<Path>>(output_path: P, data: Vec<Vec<u8>>) -> Res
     );
 
     for encoded_rpu in &data {
-        // Write 4-byte start code followed by the NAL data (0x7C 0x01 + RPU)
+        // encoded_rpu = [0x7C, 0x01, <RPU bytes>] — skip the 2-byte HEVC NAL header
+        // so the file contains [0x00, 0x00, 0x00, 0x01, 0x19, ...] as parse_rpu_file expects
         writer.write_all(&[0x00, 0x00, 0x00, 0x01])?;
-        writer.write_all(encoded_rpu)?;
+        writer.write_all(&encoded_rpu[2..])?;
     }
 
     writer.flush()?;

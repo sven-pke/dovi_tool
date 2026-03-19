@@ -130,11 +130,11 @@ impl RpuExtractor {
         );
 
         for rpu in rpus {
-            // Encode as HEVC NALU format for compatibility with inject-rpu
-            // Format: 00 00 00 01  7C 01  <RPU data starting with 0x19>
+            // write_hevc_unspec62_nalu returns [7C 01 <RPU bytes starting with 0x19>]
+            // parse_rpu_file expects [00 00 00 01 19 ...] — skip the 2-byte 7C 01 header
             let encoded = rpu.write_hevc_unspec62_nalu()?;
-            writer.write_all(&[0x00, 0x00, 0x00, 0x01])?; // 4-byte start code
-            writer.write_all(&encoded)?; // 7C 01 + RPU payload
+            writer.write_all(&[0x00, 0x00, 0x00, 0x01])?;
+            writer.write_all(&encoded[2..])?;
         }
 
         writer.flush()?;
