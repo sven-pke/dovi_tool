@@ -1,21 +1,24 @@
-use anyhow::{Result, bail};
-use indicatif::ProgressBar;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+
+use anyhow::Result;
 
 use crate::commands::RemoveArgs;
 
-use super::{CliOptions, IoFormat, general_read_write, input_from_either};
-
-use general_read_write::{DoviProcessor, DoviWriter};
+use super::av1_parser::{
+    Obu, is_dovi_rpu_obu, read_ivf_frame_header, read_obus_from_ivf_frame,
+    try_read_ivf_file_header, write_ivf_frame_header,
+};
+use super::input_from_either;
 
 pub struct Remover {
-    format: IoFormat,
     input: PathBuf,
     output: PathBuf,
 }
 
 impl Remover {
-    pub fn from_args(args: RemoveArgs) -> Result<Self> {
+    pub fn remove(args: RemoveArgs, _options: super::CliOptions) -> Result<()> {
         let RemoveArgs {
             input,
             input_pos,
@@ -23,43 +26,65 @@ impl Remover {
         } = args;
 
         let input = input_from_either("remove", input, input_pos)?;
-        let format = hevc_parser::io::format_from_path(&input)?;
+        let output = output.unwrap_or_else(|| PathBuf::from("BL.av1"));
 
-        let output = output.unwrap_or(PathBuf::from("BL.hevc"));
+        let pb = super::initialize_progress_bar(&input)?;
 
-        Ok(Self {
-            format,
-            input,
-            output,
-        })
+        let remover = Remover { input, output };
+        let res = remover.process_input();
+
+        pb.finish_and_clear();
+        res
     }
 
-    pub fn remove(args: RemoveArgs, options: CliOptions) -> Result<()> {
-        let remover = Remover::from_args(args)?;
-        remover.process_input(options)
-    }
+    fn process_input(&self) -> Result<()> {
+        let file = File::open(&self.input)?;
+        let mut reader = BufReader::with_capacity(100_000, file);
 
-    fn process_input(&self, options: CliOptions) -> Result<()> {
-        let pb = super::initialize_progress_bar(&self.format, &self.input)?;
+        let out_file = File::create(&self.output).expect("Can't create output file");
+        let mut writer = BufWriter::with_capacity(100_000, out_file);
 
-        match self.format {
-            IoFormat::Matroska => bail!("Remover: Matroska input is unsupported"),
-            _ => self.remove_from_raw_hevc(pb, options),
+        if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
+            // IVF: pass file header through, then remove DoVi OBUs per frame
+            writer.write_all(&ivf_header)?;
+
+            loop {
+                let fh = match read_ivf_frame_header(&mut reader)? {
+                    Some(h) => h,
+                    None => break,
+                };
+
+                let mut frame_data = vec![0u8; fh.frame_size as usize];
+                reader.read_exact(&mut frame_data)?;
+
+                let obus = read_obus_from_ivf_frame(frame_data)?;
+
+                // Collect output OBUs (skip Dolby Vision RPU)
+                let output_frame: Vec<u8> = obus
+                    .iter()
+                    .filter(|o| !is_dovi_rpu_obu(o))
+                    .flat_map(|o| o.raw_bytes.iter().copied())
+                    .collect();
+
+                write_ivf_frame_header(&mut writer, output_frame.len() as u32, fh.timestamp)?;
+                writer.write_all(&output_frame)?;
+            }
+        } else {
+            // Raw OBU stream: skip Dolby Vision RPU OBUs, copy everything else
+            loop {
+                match Obu::read_from(&mut reader) {
+                    Ok(Some(obu)) => {
+                        if !is_dovi_rpu_obu(&obu) {
+                            writer.write_all(&obu.raw_bytes)?;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                }
+            }
         }
-    }
 
-    fn remove_from_raw_hevc(&self, pb: ProgressBar, options: CliOptions) -> Result<()> {
-        let bl_out = Some(self.output.as_path());
-
-        let dovi_writer = DoviWriter::new(bl_out, None, None, None);
-        let mut dovi_processor = DoviProcessor::new(
-            options,
-            self.input.clone(),
-            dovi_writer,
-            pb,
-            Default::default(),
-        );
-
-        dovi_processor.read_write_from_io(&self.format)
+        writer.flush()?;
+        Ok(())
     }
 }

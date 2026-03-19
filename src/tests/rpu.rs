@@ -9,9 +9,6 @@ use dolby_vision::rpu::extension_metadata::blocks::{ExtMetadataBlock, ExtMetadat
 use dolby_vision::rpu::extension_metadata::{ColorPrimaries, MasteringDisplayPrimaries};
 use dolby_vision::rpu::generate::GenerateConfig;
 use dolby_vision::rpu::rpu_data_nlq::DoviELType;
-use hevc_parser::hevc::{NAL_UNSPEC62, NALUnit};
-use hevc_parser::io::StartCodePreset;
-
 use crate::commands::GenerateArgs;
 use crate::dovi::generator::Generator;
 
@@ -27,35 +24,6 @@ pub fn _parse_file(input: PathBuf) -> Result<(Vec<u8>, DoviRpu)> {
     Ok((original_data, dovi_rpu))
 }
 
-fn _debug(data: &[u8]) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("test.bin")?;
-
-    NALUnit::write_with_preset(
-        &mut file,
-        &data[2..],
-        StartCodePreset::Four,
-        NAL_UNSPEC62,
-        true,
-    )?;
-
-    file.flush()?;
-
-    Ok(())
-}
-
-fn _debug_generate(config: &GenerateConfig) -> Result<()> {
-    let path = PathBuf::from("test.bin");
-    config.write_rpus(path)?;
-
-    Ok(())
-}
 
 #[test]
 fn profile4() -> Result<()> {

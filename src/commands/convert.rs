@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub struct ConvertArgs {
     #[arg(
         id = "input",
-        help = "Sets the input HEVC file to use, or piped with -",
+        help = "Sets the input AV1 file to use",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -16,7 +16,7 @@ pub struct ConvertArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input HEVC file to use, or piped with - (positional)",
+        help = "Sets the input AV1 file to use (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -26,11 +26,8 @@ pub struct ConvertArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Converted single layer output file location",
+        help = "Converted output AV1 file location",
         value_hint = ValueHint::FilePath
     )]
     pub output: Option<PathBuf>,
-
-    #[arg(short = 'd', long, help = "Discard the EL stream")]
-    pub discard: bool,
 }

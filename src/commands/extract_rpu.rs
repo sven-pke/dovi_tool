@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub struct ExtractRpuArgs {
     #[arg(
         id = "input",
-        help = "Sets the input HEVC file to use, or piped with -",
+        help = "Sets the input AV1 file to use",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -16,7 +16,7 @@ pub struct ExtractRpuArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input HEVC file to use, or piped with - (positional)",
+        help = "Sets the input AV1 file to use (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -35,7 +35,7 @@ pub struct ExtractRpuArgs {
         id = "limit",
         long,
         short = 'l',
-        help = "Stop processing input after N frames"
+        help = "Stop processing input after N OBUs"
     )]
     pub limit: Option<u64>,
 }

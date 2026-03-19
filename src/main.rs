@@ -11,13 +11,11 @@ use commands::{Commands, ConversionModeCli};
 
 mod dovi;
 use dovi::{
-    CliOptions, WriteStartCodePreset,
+    CliOptions,
     converter::Converter,
-    demuxer::Demuxer,
     editor::{EditConfig, Editor},
     exporter::Exporter,
     generator::Generator,
-    muxer::Muxer,
     plotter::Plotter,
     remover::Remover,
     rpu_extractor::RpuExtractor,
@@ -28,7 +26,7 @@ use dovi::{
 #[derive(Parser, Debug)]
 #[command(
     name = env!("CARGO_PKG_NAME"),
-    about = "CLI tool combining multiple utilities for working with Dolby Vision",
+    about = "CLI tool combining multiple utilities for working with Dolby Vision in AV1",
     author = "quietvoid",
     version = option_env!("VERGEN_GIT_DESCRIBE").unwrap_or(env!("CARGO_PKG_VERSION"))
 )]
@@ -56,23 +54,12 @@ struct Opt {
     )]
     crop: bool,
 
-    #[arg(long, help = "Ignore HDR10+ metadata when writing the output HEVC.")]
-    drop_hdr10plus: bool,
-
     #[arg(
         long,
         help = "Sets the edit JSON config file to use",
         value_hint = ValueHint::FilePath
     )]
     edit_config: Option<PathBuf>,
-
-    #[arg(
-        value_enum,
-        long,
-        help = "Start code to use when writing HEVC",
-        default_value = "four"
-    )]
-    start_code: WriteStartCodePreset,
 
     #[command(subcommand)]
     cmd: Commands,
@@ -90,10 +77,7 @@ fn main() -> Result<()> {
     let mut cli_options = CliOptions {
         mode: opt.mode,
         crop: opt.crop,
-        discard_el: false,
-        drop_hdr10plus: opt.drop_hdr10plus,
         edit_config,
-        start_code: opt.start_code.into(),
     };
 
     // Set mode 0 by default if cropping, otherwise it has no effect
@@ -102,15 +86,13 @@ fn main() -> Result<()> {
     }
 
     match opt.cmd {
-        Commands::Demux(args) => Demuxer::demux(args, cli_options),
-        Commands::Editor(args) => Editor::edit(args),
         Commands::Convert(args) => Converter::convert(args, cli_options),
+        Commands::Editor(args) => Editor::edit(args),
+        Commands::Export(args) => Exporter::export(args),
         Commands::ExtractRpu(args) => RpuExtractor::extract_rpu(args, cli_options),
         Commands::InjectRpu(args) => RpuInjector::inject_rpu(args, cli_options),
         Commands::Info(args) => RpuInfo::info(args),
         Commands::Generate(args) => Generator::generate(args),
-        Commands::Export(args) => Exporter::export(args),
-        Commands::Mux(args) => Muxer::mux_el(args, cli_options),
         Commands::Plot(args) => Plotter::plot(args),
         Commands::Remove(args) => Remover::remove(args, cli_options),
     }
