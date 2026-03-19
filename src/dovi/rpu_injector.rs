@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use indicatif::ProgressBar;
@@ -14,8 +14,106 @@ use dolby_vision::rpu::utils::parse_rpu_file;
 
 use crate::commands::InjectRpuArgs;
 
+use super::av1::{
+    IvfWriter, ObuReader, ObuWriter,
+    build_dovi_obu, is_dovi_rpu_obu,
+    try_read_ivf_file_header, read_ivf_frame_header, read_obus_from_ivf_frame,
+};
 use super::hdr10plus_utils::prefix_sei_removed_hdr10plus_nalu;
 use super::{CliOptions, DoviRpu, IoFormat, input_from_either};
+
+fn is_av1_input(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("av1") | Some("ivf")
+    )
+}
+
+fn inject_rpu_av1(input: &Path, rpu_in: &Path, output: &Path) -> Result<()> {
+    println!("Parsing RPU file...");
+    stdout().flush().ok();
+
+    let rpus = parse_rpu_file(rpu_in)?;
+
+    println!("Injecting RPU into AV1 bitstream...");
+    stdout().flush().ok();
+
+    let in_file = File::open(input)?;
+    let mut reader = BufReader::new(in_file);
+
+    if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
+        // IVF container path
+        let out_file = BufWriter::new(File::create(output).expect("Can't create file"));
+        let mut ivf_writer = IvfWriter::new(out_file, &ivf_header)?;
+
+        let mut frame_index = 0usize;
+        while let Some(frame_hdr) = read_ivf_frame_header(&mut reader)? {
+            let mut frame_data = vec![0u8; frame_hdr.frame_size as usize];
+            std::io::Read::read_exact(&mut reader, &mut frame_data)?;
+
+            let obus = read_obus_from_ivf_frame(frame_data)?;
+            let mut new_frame: Vec<u8> = Vec::new();
+
+            // Build the DoVi OBU for this frame
+            let rpu_obu_bytes = if let Some(rpu) = rpus.get(frame_index).or_else(|| rpus.last()) {
+                Some(build_dovi_obu(rpu)?)
+            } else {
+                None
+            };
+
+            let mut rpu_inserted = false;
+            for obu in &obus {
+                if is_dovi_rpu_obu(obu) {
+                    // Replace existing DoVi OBU with new one
+                    if let Some(ref bytes) = rpu_obu_bytes {
+                        if !rpu_inserted {
+                            new_frame.extend_from_slice(bytes);
+                            rpu_inserted = true;
+                        }
+                    }
+                } else {
+                    new_frame.extend_from_slice(&obu.raw_bytes);
+                }
+            }
+
+            // If no existing DoVi OBU was found, append the new one at end
+            if !rpu_inserted {
+                if let Some(ref bytes) = rpu_obu_bytes {
+                    new_frame.extend_from_slice(bytes);
+                }
+            }
+
+            ivf_writer.write_frame(frame_hdr.timestamp, &new_frame)?;
+            frame_index += 1;
+        }
+
+        ivf_writer.flush()?;
+    } else {
+        // Raw AV1 bitstream path
+        let out_file = BufWriter::new(File::create(output).expect("Can't create file"));
+        let mut obu_writer = ObuWriter::new(out_file);
+        let mut obu_reader = ObuReader::new(reader);
+
+        let mut frame_index = 0usize;
+        while let Some(obu) = obu_reader.next_obu()? {
+            if is_dovi_rpu_obu(&obu) {
+                // Replace with new DoVi OBU
+                if let Some(rpu) = rpus.get(frame_index).or_else(|| rpus.last()) {
+                    let bytes = build_dovi_obu(rpu)?;
+                    obu_writer.write_raw(&bytes)?;
+                    frame_index += 1;
+                }
+            } else {
+                obu_writer.write_raw(&obu.raw_bytes)?;
+            }
+        }
+
+        obu_writer.flush()?;
+    }
+
+    println!("Done.");
+    Ok(())
+}
 
 pub struct RpuInjector {
     input: PathBuf,
@@ -91,6 +189,15 @@ impl RpuInjector {
 
     pub fn inject_rpu(args: InjectRpuArgs, cli_options: CliOptions) -> Result<()> {
         let input = input_from_either("inject-rpu", args.input.clone(), args.input_pos.clone())?;
+
+        if is_av1_input(&input) {
+            let output = args.output.clone().unwrap_or_else(|| {
+                let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("av1");
+                PathBuf::from(format!("injected_output.{ext}"))
+            });
+            return inject_rpu_av1(&input, &args.rpu_in, &output);
+        }
+
         let format = hevc_parser::io::format_from_path(&input)?;
 
         if let IoFormat::Raw = format {
