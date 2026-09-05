@@ -538,6 +538,18 @@ pub const MATROSKA_AV1_CODEC_ID: &str = "V_AV1";
 /// Matroska codec id of an HEVC video track.
 pub const MATROSKA_HEVC_CODEC_ID: &str = "V_MPEGH/ISO/HEVC";
 
+/// A temporal delimiter OBU with an empty payload, the way every temporal unit
+/// of a low overhead bitstream starts.
+pub fn temporal_delimiter_obu() -> Obu {
+    Obu {
+        obu_type: OBU_TEMPORAL_DELIMITER,
+        temporal_id: 0,
+        spatial_id: 0,
+        payload: Vec::new(),
+        raw_bytes: vec![(OBU_TEMPORAL_DELIMITER << 3) | 0x02, 0x00],
+    }
+}
+
 /// Codec of the first video track in a Matroska file, or `None` if the file is
 /// not Matroska or carries neither AV1 nor HEVC video.
 pub fn matroska_video_codec(path: &Path) -> Option<BitstreamCodec> {
@@ -596,7 +608,37 @@ impl MatroskaAv1Reader {
                 continue;
             }
 
-            return read_obus_from_ivf_frame(std::mem::take(&mut self.frame.data)).map(Some);
+            let mut obus = read_obus_from_ivf_frame(std::mem::take(&mut self.frame.data))?;
+
+            // Matroska stores a temporal unit without its delimiter, so put it
+            // back. Without it a raw stream written from these OBUs has no
+            // temporal unit boundaries left and collapses into a single one.
+            if obus.first().map(|o| o.obu_type) != Some(OBU_TEMPORAL_DELIMITER) {
+                obus.insert(0, temporal_delimiter_obu());
+            }
+
+            return Ok(Some(obus));
         }
+    }
+}
+
+#[cfg(test)]
+mod matroska_tests {
+    use super::*;
+
+    #[test]
+    fn temporal_delimiter_is_two_bytes() {
+        let td = temporal_delimiter_obu();
+
+        assert_eq!(td.raw_bytes, [0x12, 0x00]);
+        assert_eq!(td.obu_type, OBU_TEMPORAL_DELIMITER);
+
+        // and it reads back as the same thing
+        let mut cursor = std::io::Cursor::new(td.raw_bytes.clone());
+        let parsed = Obu::read_from(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(parsed.obu_type, OBU_TEMPORAL_DELIMITER);
+        assert!(parsed.payload.is_empty());
+        assert_eq!(cursor.position() as usize, td.raw_bytes.len());
     }
 }
