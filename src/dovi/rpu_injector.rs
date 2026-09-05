@@ -15,18 +15,15 @@ use dolby_vision::rpu::utils::parse_rpu_file;
 use crate::commands::InjectRpuArgs;
 
 use super::av1::{
-    IvfFrameHeader, IvfWriter, Obu, OBU_TEMPORAL_DELIMITER,
-    build_dovi_obu, is_dovi_rpu_obu,
-    try_read_ivf_file_header, read_ivf_frame_header, read_obus_from_ivf_frame,
+    BitstreamCodec, IvfFrameHeader, IvfWriter, OBU_TEMPORAL_DELIMITER, Obu, build_dovi_obu,
+    detect_codec, is_dovi_rpu_obu, metadata_insert_index, read_ivf_frame_header,
+    read_obus_from_ivf_frame, try_read_ivf_file_header,
 };
 use super::hdr10plus_utils::prefix_sei_removed_hdr10plus_nalu;
 use super::{CliOptions, DoviRpu, IoFormat, input_from_either};
 
 fn is_av1_input(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("av1") | Some("ivf")
-    )
+    detect_codec(path) == BitstreamCodec::Av1
 }
 
 fn inject_rpu_av1(input: &Path, rpu_in: &Path, output: &Path) -> Result<()> {
@@ -134,19 +131,19 @@ fn inject_raw_av1<R: Read, W: Write>(
     let mut warned_existing = false;
     let mut warned_mismatch = false;
 
-    let mut current_td: Option<Obu> = None;
-    let mut pending: Vec<Obu> = Vec::new();
+    // OBUs of the temporal unit currently being read, temporal delimiter included
+    let mut tu: Vec<Obu> = Vec::new();
 
     loop {
         let obu_opt = Obu::read_from(reader)?;
         let is_eof = obu_opt.is_none();
-        let is_td = obu_opt
+        let starts_new_tu = obu_opt
             .as_ref()
             .map(|o| o.obu_type == OBU_TEMPORAL_DELIMITER)
             .unwrap_or(false);
 
-        if (is_eof || is_td) && current_td.is_some() {
-            if !warned_existing && pending.iter().any(|o| is_dovi_rpu_obu(o)) {
+        if (is_eof || starts_new_tu) && !tu.is_empty() {
+            if !warned_existing && tu.iter().any(is_dovi_rpu_obu) {
                 warned_existing = true;
                 println!(
                     "\nWarning: Input file already has Dolby Vision RPU OBUs; \
@@ -171,32 +168,15 @@ fn inject_raw_av1<R: Read, W: Write>(
                 }
             };
 
-            // Write: TD + RPU OBU + remaining OBUs (skip existing DoVi)
-            let td = current_td.take().unwrap();
-            writer.write_all(&td.raw_bytes)?;
-            writer.write_all(&encoded)?;
-            for obu in pending.drain(..) {
-                if !is_dovi_rpu_obu(&obu) {
-                    writer.write_all(&obu.raw_bytes)?;
-                }
-            }
+            writer.write_all(&build_output_frame_av1(&tu, &encoded))?;
+            tu.clear();
 
             tu_index += 1;
         }
 
         match obu_opt {
             None => break,
-            Some(obu) => {
-                if obu.obu_type == OBU_TEMPORAL_DELIMITER {
-                    current_td = Some(obu);
-                    pending.clear();
-                } else if current_td.is_some() {
-                    pending.push(obu);
-                } else {
-                    // OBUs before the first TD — pass through unchanged
-                    writer.write_all(&obu.raw_bytes)?;
-                }
-            }
+            Some(obu) => tu.push(obu),
         }
     }
 
@@ -210,24 +190,16 @@ fn inject_raw_av1<R: Read, W: Write>(
     Ok(())
 }
 
-/// Build the output byte buffer for one IVF temporal unit:
-/// inject the RPU OBU right after OBU_TEMPORAL_DELIMITER (if present)
-/// and strip any existing Dolby Vision RPU OBUs.
+/// Build the output byte buffer for one temporal unit: inject the RPU OBU
+/// immediately before the first frame OBU and strip any existing Dolby Vision
+/// RPU OBUs.
 fn build_output_frame_av1(obus: &[Obu], encoded: &[u8]) -> Vec<u8> {
+    let insert_at = metadata_insert_index(obus);
     let mut out = Vec::new();
-    let mut injected = false;
-
-    // Insertion point: right after OBU_TEMPORAL_DELIMITER, or at position 0
-    let insert_after_td = obus
-        .iter()
-        .position(|o| o.obu_type == OBU_TEMPORAL_DELIMITER)
-        .map(|i| i + 1)
-        .unwrap_or(0);
 
     for (i, obu) in obus.iter().enumerate() {
-        if !injected && i == insert_after_td {
+        if i == insert_at {
             out.extend_from_slice(encoded);
-            injected = true;
         }
         if is_dovi_rpu_obu(obu) {
             continue; // drop existing Dolby Vision RPU
@@ -235,7 +207,8 @@ fn build_output_frame_av1(obus: &[Obu], encoded: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&obu.raw_bytes);
     }
 
-    if !injected {
+    // No frame OBU in this temporal unit — append at the end
+    if insert_at >= obus.len() {
         out.extend_from_slice(encoded);
     }
 

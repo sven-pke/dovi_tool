@@ -133,6 +133,38 @@ impl DoviProcessor {
     }
 
     pub fn read_write_from_io(&mut self, format: &IoFormat) -> Result<()> {
+        let mut processor = self.hevc_processor(format);
+
+        let file_path = if let IoFormat::RawStdin = format {
+            None
+        } else {
+            Some(self.input.clone())
+        };
+
+        processor.process_file(self, file_path)
+    }
+
+    /// Parse an already opened elementary stream instead of reopening the input.
+    ///
+    /// Needed when the codec had to be sniffed from the first bytes — for stdin
+    /// those bytes cannot be pushed back onto the stream, so the reader that
+    /// holds them has to be handed through. Matroska input is not supported
+    /// here; it needs the container processor and therefore a file path.
+    pub fn read_write_from_reader(
+        &mut self,
+        format: &IoFormat,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        if let IoFormat::Matroska = format {
+            bail!("Matroska input must be processed from a file path");
+        }
+
+        let mut processor = self.hevc_processor(format);
+
+        processor.process_io(reader, self)
+    }
+
+    fn hevc_processor(&self, format: &IoFormat) -> HevcProcessor {
         let chunk_size = 100_000;
 
         let container_opts = Some(processor::ContainerProcessorOpts {
@@ -144,15 +176,8 @@ impl DoviProcessor {
             container_opts,
             ..Default::default()
         };
-        let mut processor = HevcProcessor::new(format.clone(), processor_opts, chunk_size);
 
-        let file_path = if let IoFormat::RawStdin = format {
-            None
-        } else {
-            Some(self.input.clone())
-        };
-
-        processor.process_file(self, file_path)
+        HevcProcessor::new(format.clone(), processor_opts, chunk_size)
     }
 
     pub fn write_nals(&mut self, chunk: &[u8], nals: &[NALUnit]) -> Result<()> {

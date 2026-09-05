@@ -1,7 +1,7 @@
 use anyhow::Result;
 use indicatif::ProgressBar;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{commands::ExtractRpuArgs, dovi::general_read_write::DoviProcessorError};
@@ -14,9 +14,9 @@ use super::{
 use general_read_write::{DoviProcessor, DoviWriter};
 
 use super::av1::{
-    OBU_METADATA, ObuReader,
-    is_dovi_rpu_obu, extract_dovi_t35_payload,
-    try_read_ivf_file_header, read_ivf_frame_header, read_obus_from_ivf_frame,
+    BitstreamCodec, OBU_TEMPORAL_DELIMITER, Obu, detect_codec, extract_dovi_t35_payload,
+    is_dovi_rpu_obu, is_stdin, open_input, read_ivf_frame_header, read_obus_from_ivf_frame,
+    try_read_ivf_file_header,
 };
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
 use hevc_parser::hevc::{NAL_UNSPEC62, NALUnit};
@@ -31,10 +31,7 @@ pub struct RpuExtractor {
 }
 
 fn is_av1_input(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("av1") | Some("ivf")
-    )
+    !is_stdin(path) && detect_codec(path) == BitstreamCodec::Av1
 }
 
 impl RpuExtractor {
@@ -76,64 +73,78 @@ impl RpuExtractor {
     }
 
     fn process_input(&self, options: CliOptions) -> Result<()> {
-        if is_av1_input(&self.input) {
-            self.extract_rpu_from_av1()
-        } else {
-            let pb = super::initialize_progress_bar(&self.format, &self.input)?;
-            self.extract_rpu_from_el(pb, options)
+        let (codec, mut reader) = open_input(&self.input)?;
+
+        match codec {
+            BitstreamCodec::Av1 => self.extract_rpu_from_av1(&mut reader),
+            BitstreamCodec::Hevc => {
+                let pb = super::initialize_progress_bar(&self.format, &self.input)?;
+                self.extract_rpu_from_el(pb, options, reader)
+            }
         }
     }
 
-    fn extract_rpu_from_av1(&self) -> Result<()> {
+    fn extract_rpu_from_av1(&self, reader: &mut dyn BufRead) -> Result<()> {
         println!("Extracting RPU from AV1 bitstream...");
 
-        let file = File::open(&self.input)?;
-        let mut reader = BufReader::new(file);
+        // Sized handle over the trait object, so the generic readers accept it
+        let mut reader = reader;
 
         let mut rpus: Vec<Vec<u8>> = Vec::new();
-        let mut frame_count: u64 = 0;
+        let mut tu_count: u64 = 0;
+
+        let mut collect = |obus: &[Obu]| -> Result<()> {
+            for obu in obus {
+                if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload)
+                    .filter(|_| is_dovi_rpu_obu(obu))
+                {
+                    let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
+                    rpus.push(rpu.write_hevc_unspec62_nalu()?);
+                }
+            }
+
+            Ok(())
+        };
 
         // Detect IVF container by peeking at first bytes
-        if let Some(_ivf_header) = try_read_ivf_file_header(&mut reader)? {
-            // IVF container: iterate over IVF frames
+        if try_read_ivf_file_header(&mut reader)?.is_some() {
+            // IVF container: one temporal unit per IVF frame
             while let Some(frame_hdr) = read_ivf_frame_header(&mut reader)? {
-                if let Some(limit) = self.limit {
-                    if frame_count >= limit {
-                        break;
-                    }
+                if self.limit.is_some_and(|limit| tu_count >= limit) {
+                    break;
                 }
 
                 let mut frame_data = vec![0u8; frame_hdr.frame_size as usize];
-                std::io::Read::read_exact(&mut reader, &mut frame_data)?;
+                reader.read_exact(&mut frame_data)?;
 
-                let obus = read_obus_from_ivf_frame(frame_data)?;
-                for obu in &obus {
-                    if is_dovi_rpu_obu(obu) {
-                        if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload) {
-                            let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
-                            rpus.push(rpu.write_hevc_unspec62_nalu()?);
-                        }
-                    }
-                }
+                collect(&read_obus_from_ivf_frame(frame_data)?)?;
 
-                frame_count += 1;
+                tu_count += 1;
             }
         } else {
-            // Raw AV1 bitstream
-            let mut obu_reader = ObuReader::new(reader);
-            while let Some(obu) = obu_reader.next_obu()? {
-                if let Some(limit) = self.limit {
-                    if frame_count >= limit {
+            // Raw AV1 bitstream: temporal units are delimited by OBU_TEMPORAL_DELIMITER
+            let mut tu: Vec<Obu> = Vec::new();
+
+            loop {
+                let obu = Obu::read_from(&mut reader)?;
+                let starts_new_tu = obu
+                    .as_ref()
+                    .is_some_and(|o| o.obu_type == OBU_TEMPORAL_DELIMITER);
+
+                if (obu.is_none() || starts_new_tu) && !tu.is_empty() {
+                    collect(&tu)?;
+                    tu.clear();
+
+                    tu_count += 1;
+
+                    if self.limit.is_some_and(|limit| tu_count >= limit) {
                         break;
                     }
                 }
 
-                if obu.obu_type == OBU_METADATA && is_dovi_rpu_obu(&obu) {
-                    if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload) {
-                        let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
-                        rpus.push(rpu.write_hevc_unspec62_nalu()?);
-                    }
-                    frame_count += 1;
+                match obu {
+                    None => break,
+                    Some(obu) => tu.push(obu),
                 }
             }
         }
@@ -165,7 +176,12 @@ impl RpuExtractor {
         Ok(())
     }
 
-    fn extract_rpu_from_el(&self, pb: ProgressBar, options: CliOptions) -> Result<()> {
+    fn extract_rpu_from_el(
+        &self,
+        pb: ProgressBar,
+        options: CliOptions,
+        mut reader: Box<dyn BufRead>,
+    ) -> Result<()> {
         let rpu_out = self.rpu_out.as_path();
 
         let dovi_writer = DoviWriter::new(None, None, Some(rpu_out), None);
@@ -180,7 +196,11 @@ impl RpuExtractor {
             },
         );
 
-        let res = dovi_processor.read_write_from_io(&self.format);
+        let res = match self.format {
+            // The container processor needs to seek, so it reopens the file
+            IoFormat::Matroska => dovi_processor.read_write_from_io(&self.format),
+            _ => dovi_processor.read_write_from_reader(&self.format, &mut reader),
+        };
 
         if res.as_ref().is_err_and(|err| {
             err.downcast_ref::<DoviProcessorError>()

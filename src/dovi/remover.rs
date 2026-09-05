@@ -1,25 +1,21 @@
 use anyhow::Result;
 use indicatif::ProgressBar;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufRead, BufWriter};
 use std::path::{Path, PathBuf};
 
 use crate::commands::RemoveArgs;
 
 use super::av1::{
-    IvfWriter, ObuReader, ObuWriter,
-    is_dovi_rpu_obu,
-    try_read_ivf_file_header, read_ivf_frame_header, read_obus_from_ivf_frame,
+    BitstreamCodec, IvfWriter, Obu, ObuWriter, detect_codec, is_dovi_rpu_obu, is_stdin, open_input,
+    read_ivf_frame_header, read_obus_from_ivf_frame, try_read_ivf_file_header,
 };
 use super::{CliOptions, IoFormat, general_read_write, input_from_either};
 
 use general_read_write::{DoviProcessor, DoviWriter};
 
 fn is_av1_input(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("av1") | Some("ivf")
-    )
+    !is_stdin(path) && detect_codec(path) == BitstreamCodec::Av1
 }
 
 pub struct Remover {
@@ -60,8 +56,10 @@ impl Remover {
     }
 
     fn process_input(&self, options: CliOptions) -> Result<()> {
-        if is_av1_input(&self.input) {
-            return self.remove_from_av1();
+        let (codec, mut reader) = open_input(&self.input)?;
+
+        if let BitstreamCodec::Av1 = codec {
+            return self.remove_from_av1(&mut reader);
         }
 
         let pb = super::initialize_progress_bar(&self.format, &self.input)?;
@@ -70,14 +68,14 @@ impl Remover {
             println!("Remover: Matroska input is experimental!");
         }
 
-        self.remove_from_hevc(pb, options)
+        self.remove_from_hevc(pb, options, reader)
     }
 
-    fn remove_from_av1(&self) -> Result<()> {
+    fn remove_from_av1(&self, reader: &mut dyn BufRead) -> Result<()> {
         println!("Removing DoVi RPU from AV1 bitstream...");
 
-        let in_file = File::open(&self.input)?;
-        let mut reader = BufReader::new(in_file);
+        // Sized handle over the trait object, so the generic readers accept it
+        let mut reader = reader;
 
         if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
             // IVF container
@@ -86,7 +84,7 @@ impl Remover {
 
             while let Some(frame_hdr) = read_ivf_frame_header(&mut reader)? {
                 let mut frame_data = vec![0u8; frame_hdr.frame_size as usize];
-                std::io::Read::read_exact(&mut reader, &mut frame_data)?;
+                reader.read_exact(&mut frame_data)?;
 
                 let obus = read_obus_from_ivf_frame(frame_data)?;
                 let mut new_frame: Vec<u8> = Vec::new();
@@ -105,9 +103,8 @@ impl Remover {
             // Raw AV1 bitstream
             let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
             let mut obu_writer = ObuWriter::new(out_file);
-            let mut obu_reader = ObuReader::new(reader);
 
-            while let Some(obu) = obu_reader.next_obu()? {
+            while let Some(obu) = Obu::read_from(&mut reader)? {
                 if !is_dovi_rpu_obu(&obu) {
                     obu_writer.write_raw(&obu.raw_bytes)?;
                 }
@@ -120,7 +117,12 @@ impl Remover {
         Ok(())
     }
 
-    fn remove_from_hevc(&self, pb: ProgressBar, options: CliOptions) -> Result<()> {
+    fn remove_from_hevc(
+        &self,
+        pb: ProgressBar,
+        options: CliOptions,
+        mut reader: Box<dyn BufRead>,
+    ) -> Result<()> {
         let bl_out = Some(self.output.as_path());
 
         let dovi_writer = DoviWriter::new(bl_out, None, None, None);
@@ -132,6 +134,10 @@ impl Remover {
             Default::default(),
         );
 
-        dovi_processor.read_write_from_io(&self.format)
+        match self.format {
+            // The container processor needs to seek, so it reopens the file
+            IoFormat::Matroska => dovi_processor.read_write_from_io(&self.format),
+            _ => dovi_processor.read_write_from_reader(&self.format, &mut reader),
+        }
     }
 }
