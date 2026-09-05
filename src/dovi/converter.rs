@@ -7,14 +7,29 @@ use std::path::{Path, PathBuf};
 use crate::commands::ConvertArgs;
 
 use super::av1::{
-    BitstreamCodec, IvfWriter, Obu, ObuWriter, build_dovi_obu, detect_codec, extract_dovi_t35_payload,
-    is_dovi_rpu_obu, is_stdin, open_input, read_ivf_frame_header, read_obus_from_ivf_frame,
-    try_read_ivf_file_header,
+    BitstreamCodec, IvfWriter, MatroskaAv1Reader, Obu, ObuWriter, build_dovi_obu, detect_codec,
+    extract_dovi_t35_payload, is_dovi_rpu_obu, is_stdin, matroska_video_codec, open_input,
+    read_ivf_frame_header, read_obus_from_ivf_frame, try_read_ivf_file_header,
 };
 use super::{CliOptions, IoFormat, general_read_write, input_from_either};
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
 
 use general_read_write::{DoviProcessor, DoviWriter};
+
+/// Apply the conversion options to a Dolby Vision RPU OBU, passing anything
+/// else through untouched.
+fn convert_obu(options: &CliOptions, obu: &Obu) -> Result<Vec<u8>> {
+    if is_dovi_rpu_obu(obu) {
+        if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload) {
+            let mut dovi_rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
+            super::convert_encoded_from_opts_rpu(options, &mut dovi_rpu)?;
+
+            return build_dovi_obu(&dovi_rpu);
+        }
+    }
+
+    Ok(obu.raw_bytes.clone())
+}
 
 fn is_av1_input(path: &Path) -> bool {
     !is_stdin(path) && detect_codec(path) == BitstreamCodec::Av1
@@ -44,10 +59,20 @@ impl Converter {
             (IoFormat::Raw, PathBuf::from(format!("converted.{ext}")))
         } else {
             let format = hevc_parser::io::format_from_path(&input)?;
-            let default = match options.discard_el {
-                true => PathBuf::from("BL_RPU.hevc"),
-                false => PathBuf::from("BL_EL_RPU.hevc"),
+
+            // Matroska is unwrapped into a raw stream, so the result of an AV1
+            // track is raw AV1 rather than a copy of the container extension
+            let default = if format == IoFormat::Matroska
+                && matroska_video_codec(&input) == Some(BitstreamCodec::Av1)
+            {
+                PathBuf::from("converted.av1")
+            } else {
+                match options.discard_el {
+                    true => PathBuf::from("BL_RPU.hevc"),
+                    false => PathBuf::from("BL_EL_RPU.hevc"),
+                }
             };
+
             (format, default)
         };
 
@@ -66,6 +91,13 @@ impl Converter {
     }
 
     fn process_input(&self, options: CliOptions) -> Result<()> {
+        // Matroska needs the container reader rather than an elementary stream
+        if self.format == IoFormat::Matroska
+            && matroska_video_codec(&self.input) == Some(BitstreamCodec::Av1)
+        {
+            return self.convert_av1_matroska(&options);
+        }
+
         let (codec, mut reader) = open_input(&self.input)?;
 
         if let BitstreamCodec::Av1 = codec {
@@ -99,19 +131,7 @@ impl Converter {
                 let mut new_frame: Vec<u8> = Vec::new();
 
                 for obu in &obus {
-                    if is_dovi_rpu_obu(obu) {
-                        if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload) {
-                            let mut dovi_rpu =
-                                DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
-                            super::convert_encoded_from_opts_rpu(options, &mut dovi_rpu)?;
-                            let converted_bytes = build_dovi_obu(&dovi_rpu)?;
-                            new_frame.extend_from_slice(&converted_bytes);
-                        } else {
-                            new_frame.extend_from_slice(&obu.raw_bytes);
-                        }
-                    } else {
-                        new_frame.extend_from_slice(&obu.raw_bytes);
-                    }
+                    new_frame.extend_from_slice(&convert_obu(options, obu)?);
                 }
 
                 ivf_writer.write_frame(frame_hdr.timestamp, &new_frame)?;
@@ -123,22 +143,32 @@ impl Converter {
             let mut obu_writer = ObuWriter::new(out_file);
 
             while let Some(obu) = Obu::read_from(&mut reader)? {
-                if is_dovi_rpu_obu(&obu) {
-                    if let Some(t35_payload) = extract_dovi_t35_payload(&obu.payload) {
-                        let mut dovi_rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
-                        super::convert_encoded_from_opts_rpu(options, &mut dovi_rpu)?;
-                        let converted_bytes = build_dovi_obu(&dovi_rpu)?;
-                        obu_writer.write_raw(&converted_bytes)?;
-                    } else {
-                        obu_writer.write_raw(&obu.raw_bytes)?;
-                    }
-                } else {
-                    obu_writer.write_raw(&obu.raw_bytes)?;
-                }
+                obu_writer.write_raw(&convert_obu(options, &obu)?)?;
             }
 
             obu_writer.flush()?;
         }
+
+        println!("Done.");
+        Ok(())
+    }
+
+    /// Convert every temporal unit of a Matroska AV1 track into a raw AV1
+    /// stream, the same shape the HEVC path produces for Matroska input.
+    fn convert_av1_matroska(&self, options: &CliOptions) -> Result<()> {
+        println!("Converting DoVi RPU in AV1 bitstream...");
+
+        let mut mkv = MatroskaAv1Reader::open(&self.input)?;
+        let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
+        let mut obu_writer = ObuWriter::new(out_file);
+
+        while let Some(obus) = mkv.next_temporal_unit()? {
+            for obu in &obus {
+                obu_writer.write_raw(&convert_obu(options, obu)?)?;
+            }
+        }
+
+        obu_writer.flush()?;
 
         println!("Done.");
         Ok(())

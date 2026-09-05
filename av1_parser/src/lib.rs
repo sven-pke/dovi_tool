@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Cursor, ErrorKind, Read, Write};
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use matroska_demuxer::{MatroskaFile, TrackType};
 
 // ---------------------------------------------------------------------------
 // OBU type constants (AV1 spec Table 5)
@@ -524,5 +525,78 @@ mod tests {
         );
         assert_eq!(codec_from_extension(Path::new("a.mkv")), None);
         assert_eq!(codec_from_extension(Path::new("-")), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AV1 in Matroska
+// ---------------------------------------------------------------------------
+
+/// Matroska codec id of an AV1 video track.
+pub const MATROSKA_AV1_CODEC_ID: &str = "V_AV1";
+
+/// Matroska codec id of an HEVC video track.
+pub const MATROSKA_HEVC_CODEC_ID: &str = "V_MPEGH/ISO/HEVC";
+
+/// Codec of the first video track in a Matroska file, or `None` if the file is
+/// not Matroska or carries neither AV1 nor HEVC video.
+pub fn matroska_video_codec(path: &Path) -> Option<BitstreamCodec> {
+    let file = File::open(path).ok()?;
+    let mkv = MatroskaFile::open(file).ok()?;
+
+    mkv.tracks()
+        .iter()
+        .filter(|t| t.track_type() == TrackType::Video)
+        .find_map(|t| match t.codec_id() {
+            MATROSKA_AV1_CODEC_ID => Some(BitstreamCodec::Av1),
+            MATROSKA_HEVC_CODEC_ID => Some(BitstreamCodec::Hevc),
+            _ => None,
+        })
+}
+
+/// Reads the AV1 video track of a Matroska file, one temporal unit at a time.
+///
+/// A Matroska block holds exactly the OBUs of one temporal unit, so no
+/// framing is needed beyond parsing the OBUs out of the block.
+pub struct MatroskaAv1Reader {
+    mkv: MatroskaFile<File>,
+    track_id: u64,
+    frame: matroska_demuxer::Frame,
+}
+
+impl MatroskaAv1Reader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mkv = MatroskaFile::open(File::open(path)?)?;
+
+        let track = mkv
+            .tracks()
+            .iter()
+            .find(|t| t.track_type() == TrackType::Video && t.codec_id() == MATROSKA_AV1_CODEC_ID);
+
+        let Some(track) = track else {
+            bail!("No AV1 video track found in file");
+        };
+        let track_id = track.track_number().get();
+
+        Ok(Self {
+            mkv,
+            track_id,
+            frame: matroska_demuxer::Frame::default(),
+        })
+    }
+
+    /// Next temporal unit of the AV1 track, or `None` at the end of the file.
+    pub fn next_temporal_unit(&mut self) -> Result<Option<Vec<Obu>>> {
+        loop {
+            if !self.mkv.next_frame(&mut self.frame)? {
+                return Ok(None);
+            }
+
+            if self.frame.track != self.track_id {
+                continue;
+            }
+
+            return read_obus_from_ivf_frame(std::mem::take(&mut self.frame.data)).map(Some);
+        }
     }
 }

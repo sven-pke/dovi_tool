@@ -1,12 +1,12 @@
 // Re-export everything the rest of the codebase uses from the av1_parser crate
 #[allow(unused_imports)]
 pub use av1_parser::{
-    BitstreamCodec, IVF_SIGNATURE, IvfFrameHeader, IvfWriter, OBU_FRAME, OBU_FRAME_HEADER,
-    OBU_METADATA, OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER,
-    OBU_TRAILING_BITS_BYTE, Obu, ObuReader, ObuWriter, codec_from_extension, decode_leb128,
-    detect_codec, encode_leb128, is_stdin, metadata_insert_index, open_input,
-    read_ivf_frame_header, read_obus_from_ivf_frame, sniff_codec, try_read_ivf_file_header,
-    write_ivf_frame_header,
+    BitstreamCodec, IVF_SIGNATURE, IvfFrameHeader, IvfWriter, MatroskaAv1Reader, OBU_FRAME,
+    OBU_FRAME_HEADER, OBU_METADATA, OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER,
+    OBU_TEMPORAL_DELIMITER, OBU_TRAILING_BITS_BYTE, Obu, ObuReader, ObuWriter,
+    codec_from_extension, decode_leb128, detect_codec, encode_leb128, is_stdin,
+    matroska_video_codec, metadata_insert_index, open_input, read_ivf_frame_header,
+    read_obus_from_ivf_frame, sniff_codec, try_read_ivf_file_header, write_ivf_frame_header,
 };
 
 use anyhow::Result;

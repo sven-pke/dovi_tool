@@ -144,6 +144,7 @@ name = "av1_parser"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "matroska-demuxer 0.7.0",
 ]
 
 [[package]]
@@ -894,7 +895,7 @@ checksum = "5a9df1d8e830ffe200351fefd3c7ba49d90a17ce5a4f1c787d4607fc76888193"
 dependencies = [
  "anyhow",
  "bitvec_helpers",
- "matroska-demuxer",
+ "matroska-demuxer 0.8.1",
  "nom",
  "regex-lite",
 ]
@@ -1057,6 +1058,12 @@ dependencies = [
  "anyhow",
  "byteorder",
 ]
+
+[[package]]
+name = "matroska-demuxer"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb23384e6bf1431427b45e7db9574146e948ef0cd975018693e6f53eb6d44199"
 
 [[package]]
 name = "matroska-demuxer"

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+matroska-demuxer = "0.7.0"

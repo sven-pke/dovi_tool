@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::commands::RemoveArgs;
 
 use super::av1::{
-    BitstreamCodec, IvfWriter, Obu, ObuWriter, detect_codec, is_dovi_rpu_obu, is_stdin, open_input,
-    read_ivf_frame_header, read_obus_from_ivf_frame, try_read_ivf_file_header,
+    BitstreamCodec, IvfWriter, MatroskaAv1Reader, Obu, ObuWriter, detect_codec, is_dovi_rpu_obu,
+    is_stdin, matroska_video_codec, open_input, read_ivf_frame_header, read_obus_from_ivf_frame,
+    try_read_ivf_file_header,
 };
 use super::{CliOptions, IoFormat, general_read_write, input_from_either};
 
@@ -38,7 +39,19 @@ impl Remover {
             let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("av1");
             (IoFormat::Raw, PathBuf::from(format!("BL_no_dovi.{ext}")))
         } else {
-            (hevc_parser::io::format_from_path(&input)?, PathBuf::from("BL.hevc"))
+            let format = hevc_parser::io::format_from_path(&input)?;
+
+            // Matroska is unwrapped into a raw stream, so the result of an AV1
+            // track is raw AV1 rather than a copy of the container extension
+            let default = if format == IoFormat::Matroska
+                && matroska_video_codec(&input) == Some(BitstreamCodec::Av1)
+            {
+                PathBuf::from("BL_no_dovi.av1")
+            } else {
+                PathBuf::from("BL.hevc")
+            };
+
+            (format, default)
         };
 
         let output = output.unwrap_or(default_output);
@@ -56,6 +69,13 @@ impl Remover {
     }
 
     fn process_input(&self, options: CliOptions) -> Result<()> {
+        // Matroska needs the container reader rather than an elementary stream
+        if self.format == IoFormat::Matroska
+            && matroska_video_codec(&self.input) == Some(BitstreamCodec::Av1)
+        {
+            return self.remove_from_av1_matroska();
+        }
+
         let (codec, mut reader) = open_input(&self.input)?;
 
         if let BitstreamCodec::Av1 = codec {
@@ -112,6 +132,27 @@ impl Remover {
 
             obu_writer.flush()?;
         }
+
+        println!("Done.");
+        Ok(())
+    }
+
+    /// Strip the Dolby Vision RPUs out of a Matroska AV1 track and write the
+    /// result as a raw AV1 stream.
+    fn remove_from_av1_matroska(&self) -> Result<()> {
+        println!("Removing DoVi RPU from AV1 bitstream...");
+
+        let mut mkv = MatroskaAv1Reader::open(&self.input)?;
+        let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
+        let mut obu_writer = ObuWriter::new(out_file);
+
+        while let Some(obus) = mkv.next_temporal_unit()? {
+            for obu in obus.iter().filter(|o| !is_dovi_rpu_obu(o)) {
+                obu_writer.write_raw(&obu.raw_bytes)?;
+            }
+        }
+
+        obu_writer.flush()?;
 
         println!("Done.");
         Ok(())
