@@ -185,6 +185,12 @@ impl RpuExtractor {
     }
 
     fn write_av1_rpu_file(&self, rpus: &[Vec<u8>]) -> Result<()> {
+        // An empty RPU file with a success exit would read as "extracted";
+        // the HEVC path refuses in this case, and so does this one.
+        if rpus.is_empty() {
+            return Err(DoviProcessorError::NoRpuFound.into());
+        }
+
         println!("Writing RPU file...");
         let mut writer = BufWriter::with_capacity(
             100_000,

@@ -306,7 +306,7 @@ impl RpuInjector {
             injector.process_input()?;
             injector.interleave_rpu_nals()
         } else {
-            bail!("RpuInjector: Must be a raw HEVC bitstream file")
+            bail!("RpuInjector: Must be a raw HEVC or AV1 bitstream file (.hevc, .h265, .av1, .obu, .ivf); Matroska and piped input are not supported for injection")
         }
     }
 
