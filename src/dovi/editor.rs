@@ -70,22 +70,25 @@ pub struct EditConfig {
     rpu_levels: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow_cmv4_transfer: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    add_cmv4_default_metadata: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ActiveArea {
     #[serde(default)]
-    crop: bool,
+    pub crop: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    drop_l5: Option<String>,
+    pub drop_l5: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    presets: Option<Vec<ActiveAreaOffsets>>,
+    pub presets: Option<Vec<ActiveAreaOffsets>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    edits: Option<HashMap<String, u16>>,
+    pub edits: Option<HashMap<String, u16>>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -189,6 +192,13 @@ impl EditConfig {
         Ok(config)
     }
 
+    pub fn from_active_area(active_area: ActiveArea) -> Self {
+        Self {
+            active_area: Some(active_area),
+            ..Default::default()
+        }
+    }
+
     fn execute(&self, rpus: &mut [Option<DoviRpu>]) -> Result<()> {
         // Drop metadata frames
         if let Some(ranges) = &self.remove {
@@ -260,6 +270,10 @@ impl EditConfig {
 
         if self.remove_mapping {
             rpu.remove_mapping();
+        }
+
+        if self.add_cmv4_default_metadata.is_some_and(|v| v) {
+            self.add_cmv4_safe_default_metadata(rpu)?;
         }
 
         if let Some(l6) = &self.level6 {
@@ -505,6 +519,24 @@ impl EditConfig {
         }
 
         Ok(())
+    }
+
+    fn add_cmv4_safe_default_metadata(&self, rpu: &mut DoviRpu) -> Result<()> {
+        rpu.add_cmv40_safe_default_metadata()?;
+
+        Ok(())
+    }
+}
+
+impl ActiveAreaOffsets {
+    pub fn new(id: u16, meta: &ExtMetadataBlockLevel5) -> Self {
+        Self {
+            id,
+            left: meta.active_area_left_offset,
+            right: meta.active_area_right_offset,
+            top: meta.active_area_top_offset,
+            bottom: meta.active_area_bottom_offset,
+        }
     }
 }
 

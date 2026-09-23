@@ -139,3 +139,30 @@ fn extract_rpu_mkv() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn extract_rpu_not_found() -> Result<()> {
+    let mut cmd = cargo::cargo_bin_cmd!();
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let input_file = Path::new("assets/hevc_tests/regular_bl_start_code_4.hevc");
+    let output_rpu = temp.child("RPU.bin");
+
+    let assert = cmd
+        .arg(SUBCOMMAND)
+        .arg(input_file)
+        .arg("--rpu-out")
+        .arg(output_rpu.as_ref())
+        .assert();
+
+    assert
+        .failure()
+        .stderr(predicate::str::contains(
+            "Error: No RPU was found in input file",
+        ))
+        .stdout(predicate::str::is_empty());
+
+    output_rpu.assert(predicate::path::exists().not());
+
+    Ok(())
+}

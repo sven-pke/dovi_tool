@@ -29,7 +29,7 @@ pub struct InjectRpuArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output HEVC file location",
+        help = "Output file location, in the codec and container of the input",
         value_hint = ValueHint::FilePath
     )]
     pub output: Option<PathBuf>,

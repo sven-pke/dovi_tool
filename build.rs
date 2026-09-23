@@ -1,10 +1,10 @@
 use anyhow::Result;
-use vergen_gitcl::{Emitter, GitclBuilder};
+use vergen_gitcl::{Emitter, Gitcl};
 
 fn main() -> Result<()> {
-    let gitcl = GitclBuilder::default()
+    let gitcl = Gitcl::builder()
         .describe(true, true, Some("[0-9]*"))
-        .build()?;
+        .build();
 
     let gitcl_res = Emitter::default()
         .idempotent()
@@ -13,7 +13,7 @@ fn main() -> Result<()> {
         .and_then(|emitter| emitter.emit());
 
     if let Err(e) = gitcl_res {
-        eprintln!("error occured while generating instructions: {e:?}");
+        eprintln!("error occurred while generating instructions: {e:?}");
         Emitter::default().idempotent().fail_on_error().emit()?;
     }
 

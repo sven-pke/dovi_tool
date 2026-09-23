@@ -10,6 +10,9 @@ use std::{
 
 use crate::rpu::{ConversionMode, dovi_rpu::DoviRpu, utils::parse_rpu_file};
 
+#[cfg(feature = "serde")]
+use crate::rpu::generate::GenerateConfig;
+
 use super::c_structs::*;
 
 /// # Safety
@@ -446,6 +449,65 @@ pub unsafe extern "C" fn dovi_rpu_remove_mapping(ptr: *mut RpuOpaque) -> i32 {
 /// # Safety
 /// The struct pointer must be valid.
 ///
+/// Adds default CMv4.0 extension metadata (L3, L9, L11, L254) to the RPU.
+/// Does nothing if CMv4.0 metadata is already present.
+///
+/// Returns 1 if metadata was added, 0 if already present, -1 on error.
+/// If an error occurs, it is logged to RpuOpaque.error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dovi_rpu_add_cmv40_safe_default_metadata(ptr: *mut RpuOpaque) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+
+    let opaque = unsafe { &mut *ptr };
+
+    if let Some(rpu) = &mut opaque.rpu {
+        match rpu.add_cmv40_safe_default_metadata() {
+            Ok(modified) => modified as i32,
+            Err(e) => {
+                opaque.error =
+                    CString::new(format!("Failed setting CMv4.0 default metadata: {e}")).ok();
+                -1
+            }
+        }
+    } else {
+        -1
+    }
+}
+
+/// # Safety
+/// The struct pointer must be valid.
+///
+/// Removes the CMv4.0 extension metadata from the RPU, leaving a CMv2.9-only RPU.
+/// Does nothing if CMv4.0 metadata is not present.
+///
+/// Returns 0 on success, -1 on error.
+/// If an error occurs, it is logged to RpuOpaque.error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dovi_rpu_remove_cmv40_metadata(ptr: *mut RpuOpaque) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+
+    let opaque = unsafe { &mut *ptr };
+
+    if let Some(rpu) = &mut opaque.rpu {
+        match rpu.remove_cmv40_extension_metadata() {
+            Ok(_) => 0,
+            Err(e) => {
+                opaque.error = CString::new(format!("Failed removing CMv4.0 metadata: {e}")).ok();
+                -1
+            }
+        }
+    } else {
+        -1
+    }
+}
+
+/// # Safety
+/// The struct pointer must be valid.
+///
 /// Writes the encoded RPU as `itu_t_t35_payload_bytes` for AV1 ITU-T T.35 metadata OBU
 /// If an error occurs in the writing, it is logged to RpuOpaque.error
 #[unsafe(no_mangle)]
@@ -497,4 +559,65 @@ pub unsafe extern "C" fn dovi_write_av1_rpu_metadata_obu_t35_complete(
     } else {
         null_mut()
     }
+}
+
+/// # Safety
+/// The JSON string pointer must be valid.
+///
+/// Generates RPUs from a JSON serialized `GenerateConfig`.
+/// Returns the heap allocated `DoviRpuOpaqueList` as a pointer.
+/// The returned pointer may be null, or the list could be empty if an error occurred.
+///
+/// Requires the `serde` feature.
+///
+/// Free with `dovi_rpu_list_free`.
+#[cfg(feature = "serde")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dovi_generate_from_json(json: *const c_char) -> *const RpuOpaqueList {
+    if json.is_null() {
+        return null();
+    }
+
+    let mut rpu_list = RpuOpaqueList {
+        list: null(),
+        len: 0,
+        error: null(),
+    };
+    let mut error = None;
+
+    let json_str = match unsafe { CStr::from_ptr(json) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error = Some(format!("dovi_generate_from_json: invalid UTF-8: {e}"));
+            let err = error.and_then(|err| CString::new(err).ok());
+            if let Some(err) = err {
+                rpu_list.error = err.into_raw();
+            }
+            return Box::into_raw(Box::new(rpu_list));
+        }
+    };
+
+    match serde_json::from_str::<GenerateConfig>(json_str) {
+        Ok(config) => match config.generate_rpu_list() {
+            Ok(rpus) => {
+                rpu_list.len = rpus.len();
+
+                let opaque_list: Vec<*mut RpuOpaque> = rpus
+                    .into_iter()
+                    .map(|rpu| Box::into_raw(Box::new(RpuOpaque::new(Some(rpu)))))
+                    .collect();
+
+                rpu_list.list =
+                    Box::into_raw(opaque_list.into_boxed_slice()) as *const *mut RpuOpaque;
+            }
+            Err(e) => error = Some(format!("dovi_generate_from_json: generation failed: {e}")),
+        },
+        Err(e) => error = Some(format!("dovi_generate_from_json: invalid JSON: {e}")),
+    }
+
+    if let Some(err) = error.and_then(|err| CString::new(err).ok()) {
+        rpu_list.error = err.into_raw();
+    }
+
+    Box::into_raw(Box::new(rpu_list))
 }

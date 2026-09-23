@@ -604,9 +604,9 @@ fn generate_default_cmv40() -> Result<()> {
 
     // Only L5 and L6
     assert_eq!(vdr_dm_data.metadata_blocks(1).unwrap().len(), 2);
-    // Only L9, L11 and L254
 
-    assert_eq!(vdr_dm_data.metadata_blocks(3).unwrap().len(), 3);
+    // Only default L3, L9, L11 and L254
+    assert_eq!(vdr_dm_data.metadata_blocks(3).unwrap().len(), 4);
 
     if let ExtMetadataBlock::Level5(level5) = vdr_dm_data.get_block(5).unwrap() {
         assert_eq!(level5.get_offsets(), (0, 0, 0, 0));
@@ -619,6 +619,12 @@ fn generate_default_cmv40() -> Result<()> {
         assert_eq!(level6.max_frame_average_light_level, 400);
     }
 
+    if let ExtMetadataBlock::Level3(level3) = vdr_dm_data.get_block(3).unwrap() {
+        assert_eq!(level3.min_pq_offset, 2048);
+        assert_eq!(level3.max_pq_offset, 2048);
+        assert_eq!(level3.avg_pq_offset, 2048);
+    }
+
     if let ExtMetadataBlock::Level9(level9) = vdr_dm_data.get_block(9).unwrap() {
         assert_eq!(level9.length, 1);
         assert_eq!(level9.source_primary_index, 0);
@@ -627,7 +633,12 @@ fn generate_default_cmv40() -> Result<()> {
     if let ExtMetadataBlock::Level11(level11) = vdr_dm_data.get_block(11).unwrap() {
         assert_eq!(level11.content_type, 1);
         assert_eq!(level11.whitepoint, 0);
-        assert!(level11.reference_mode_flag);
+        assert!(!level11.reference_mode_flag);
+    }
+
+    if let ExtMetadataBlock::Level254(level254) = vdr_dm_data.get_block(254).unwrap() {
+        assert_eq!(level254.dm_mode, 0);
+        assert_eq!(level254.dm_version_index, 2);
     }
 
     Ok(())
@@ -660,8 +671,8 @@ fn generate_full() -> Result<()> {
 
     // L1, L2 * 2, L5, L6
     assert_eq!(vdr_dm_data.metadata_blocks(1).unwrap().len(), 5);
-    // Only L9, L11 and L254
-    assert_eq!(vdr_dm_data.metadata_blocks(3).unwrap().len(), 3);
+    // Only default L3, L9, L11 and L254
+    assert_eq!(vdr_dm_data.metadata_blocks(3).unwrap().len(), 4);
 
     if let ExtMetadataBlock::Level5(level5) = vdr_dm_data.get_block(5).unwrap() {
         assert_eq!(level5.get_offsets(), (0, 0, 40, 40));
@@ -745,8 +756,8 @@ fn generate_full_hdr10plus() -> Result<()> {
 
     // Only L1, L2 and L5 and L6
     assert_eq!(shot1_vdr_dm_data.metadata_blocks(1).unwrap().len(), 4);
-    // Only L9, L11 and L254
-    assert_eq!(shot1_vdr_dm_data.metadata_blocks(3).unwrap().len(), 3);
+    // Only default L3, L9, L11 and L254
+    assert_eq!(shot1_vdr_dm_data.metadata_blocks(3).unwrap().len(), 4);
 
     // Shot L1 is ignored, HDR10+ is used
     if let ExtMetadataBlock::Level1(level1) = shot1_vdr_dm_data.get_block(1).unwrap() {
@@ -780,8 +791,8 @@ fn generate_full_hdr10plus() -> Result<()> {
 
     // Only L1, L5 and L6
     assert_eq!(shot2_vdr_dm_data.metadata_blocks(1).unwrap().len(), 4);
-    // Only L9, L11 and L254
-    assert_eq!(shot2_vdr_dm_data.metadata_blocks(3).unwrap().len(), 3);
+    // Only default L3, L9, L11 and L254
+    assert_eq!(shot2_vdr_dm_data.metadata_blocks(3).unwrap().len(), 4);
 
     if let ExtMetadataBlock::Level1(level1) = shot2_vdr_dm_data.get_block(1).unwrap() {
         assert_eq!(level1.min_pq, 0);
@@ -821,8 +832,8 @@ fn generate_full_hdr10plus() -> Result<()> {
 
     // Only L1, L2 * 2, L5 and L6
     assert_eq!(edit_vdr_dm_data.metadata_blocks(1).unwrap().len(), 5);
-    // Only L9, L11 and L254
-    assert_eq!(edit_vdr_dm_data.metadata_blocks(3).unwrap().len(), 3);
+    // Only default L3, L9, L11 and L254
+    assert_eq!(edit_vdr_dm_data.metadata_blocks(3).unwrap().len(), 4);
 
     // Also ignored L1 from edit
     if let ExtMetadataBlock::Level1(level1) = edit_vdr_dm_data.get_block(1).unwrap() {
@@ -1108,7 +1119,7 @@ fn source_p5_to_p8_001_end_crc32() -> Result<()> {
     dovi_rpu.set_active_area_offsets(0, 0, 69, 69)?;
 
     let vdr_dm_data = dovi_rpu.vdr_dm_data.as_mut().unwrap();
-    vdr_dm_data.replace_metadata_level(ExtMetadataBlock::Level6(ExtMetadataBlockLevel6 {
+    vdr_dm_data.replace_metadata_block(ExtMetadataBlock::Level6(ExtMetadataBlockLevel6 {
         max_display_mastering_luminance: 4000,
         min_display_mastering_luminance: 50,
         max_content_light_level: 2095,
@@ -1128,6 +1139,29 @@ fn profile20_apple() -> Result<()> {
     let (original_data, dovi_rpu) =
         _parse_file(PathBuf::from("./assets/tests/profile20_apple.bin"))?;
     assert_eq!(dovi_rpu.dovi_profile, 5);
+    let parsed_data = dovi_rpu.write_hevc_unspec62_nalu()?;
+
+    assert_eq!(&original_data[4..], &parsed_data[2..]);
+
+    Ok(())
+}
+
+#[test]
+fn level253_ext_metadata() -> Result<()> {
+    let (original_data, dovi_rpu) =
+        _parse_file(PathBuf::from("./assets/tests/level253-ext-metadata.bin"))?;
+    assert_eq!(dovi_rpu.dovi_profile, 5);
+
+    let vdr_dm_data = dovi_rpu.vdr_dm_data.as_ref().unwrap();
+
+    let l253_meta = vdr_dm_data.get_block(253).unwrap();
+    assert_eq!(l253_meta.length_bytes(), 2);
+    assert_eq!(l253_meta.length_bits(), 16);
+
+    if let ExtMetadataBlock::Level253(b) = l253_meta {
+        assert_eq!(b.bytes, vec![0x55; 2]);
+    }
+
     let parsed_data = dovi_rpu.write_hevc_unspec62_nalu()?;
 
     assert_eq!(&original_data[4..], &parsed_data[2..]);

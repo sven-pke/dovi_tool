@@ -56,15 +56,23 @@ impl ExtMetadataBlockLevel11 {
         Ok(())
     }
 
-    /// Cinema, reference mode, D65 whitepoint
-    pub fn default_reference_cinema() -> Self {
+    /// Cinema, D65 whitepoint
+    pub const fn default_cinema() -> Self {
         Self {
             content_type: 1,
             whitepoint: 0,
-            reference_mode_flag: true,
+            reference_mode_flag: false,
             reserved_byte2: 0,
             reserved_byte3: 0,
         }
+    }
+
+    /// Cinema, reference mode, D65 whitepoint
+    pub const fn default_reference_cinema() -> Self {
+        let mut meta = Self::default_cinema();
+        meta.reference_mode_flag = true;
+
+        meta
     }
 
     const fn decode_byte1(&mut self, v: u8) {

@@ -211,3 +211,34 @@ fn annexb() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn demux_el_not_found() -> Result<()> {
+    let mut cmd = cargo::cargo_bin_cmd!();
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let input_file = Path::new("assets/hevc_tests/regular.hevc");
+    let output_bl = temp.child("BL.hevc");
+    let output_el = temp.child("EL.hevc");
+
+    let assert = cmd
+        .arg(SUBCOMMAND)
+        .arg(input_file)
+        .arg("--bl-out")
+        .arg(output_bl.as_ref())
+        .arg("--el-out")
+        .arg(output_el.as_ref())
+        .assert();
+
+    assert
+        .failure()
+        .stderr(predicate::str::contains(
+            "Error: No enhancement layer was found in input file",
+        ))
+        .stdout(predicate::str::is_empty());
+
+    output_bl.assert(predicate::path::exists().not());
+    output_el.assert(predicate::path::exists().not());
+
+    Ok(())
+}

@@ -102,3 +102,29 @@ fn trailing_bytes_rpu() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn built_obu_has_trailing_bits() -> Result<()> {
+    use crate::dovi::av1::{Obu, build_dovi_obu, extract_dovi_t35_payload, is_dovi_rpu_obu};
+
+    let (_, dovi_rpu) = _parse_file(PathBuf::from("./assets/av1-rpu/p84-01.bin"), false)?;
+
+    let obu_bytes = build_dovi_obu(&dovi_rpu)?;
+
+    // The unit must parse back as a single, complete OBU
+    let mut cursor = std::io::Cursor::new(obu_bytes.clone());
+    let obu = Obu::read_from(&mut cursor)?.expect("one OBU");
+    assert_eq!(cursor.position() as usize, obu_bytes.len());
+
+    // trailing_bits(): a single set bit, byte aligned, at the very end.
+    // Strict AV1 parsers (FFmpeg cbs_av1) reject the unit without it.
+    assert_eq!(obu.payload.last().copied().unwrap(), 0x80);
+
+    // And it stays recognisable and parseable as a Dolby Vision RPU
+    assert!(is_dovi_rpu_obu(&obu));
+    let t35 = extract_dovi_t35_payload(&obu.payload).expect("T.35 payload");
+    let reparsed = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35)?;
+    assert_eq!(reparsed.dovi_profile, dovi_rpu.dovi_profile);
+
+    Ok(())
+}
