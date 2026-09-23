@@ -16,7 +16,7 @@ pub struct CmV40DmData {
 
 impl WithExtMetadataBlocks for CmV40DmData {
     const VERSION: &'static str = "CM v4.0";
-    const ALLOWED_BLOCK_LEVELS: &'static [u8] = &[3, 8, 9, 10, 11, 254];
+    const ALLOWED_BLOCK_LEVELS: &'static [u8] = &[3, 8, 9, 10, 11, 253, 254];
 
     fn with_blocks_allocation(num_ext_blocks: u64) -> Self {
         Self {
@@ -51,6 +51,7 @@ impl WithExtMetadataBlocks for CmV40DmData {
             9 => level9::ExtMetadataBlockLevel9::parse(reader, ext_block_length)?,
             10 => level10::ExtMetadataBlockLevel10::parse(reader, ext_block_length)?,
             11 => level11::ExtMetadataBlockLevel11::parse(reader)?,
+            253 => level253::ExtMetadataBlockLevel253::parse(reader, ext_block_length)?,
             254 => level254::ExtMetadataBlockLevel254::parse(reader)?,
             1 | 2 | 4 | 5 | 6 | 255 => bail!("Disallowed block level {}", ext_block_level),
             _ => {
@@ -175,6 +176,21 @@ impl CmV40DmData {
             ext_metadata_blocks: vec![ExtMetadataBlock::Level254(
                 ExtMetadataBlockLevel254::cmv402_default(),
             )],
+        }
+    }
+
+    /// Creates CMv4.0 DM data with default static blocks: L3, L9, L11, L254.
+    pub fn default_safe() -> Self {
+        let ext_metadata_blocks = vec![
+            ExtMetadataBlock::Level3(ExtMetadataBlockLevel3::default()),
+            ExtMetadataBlock::Level9(ExtMetadataBlockLevel9::default_dci_p3()),
+            ExtMetadataBlock::Level254(ExtMetadataBlockLevel254::cmv402_default()),
+            ExtMetadataBlock::Level11(ExtMetadataBlockLevel11::default_cinema()),
+        ];
+
+        Self {
+            num_ext_blocks: ext_metadata_blocks.len() as u64,
+            ext_metadata_blocks,
         }
     }
 

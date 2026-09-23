@@ -1,10 +1,13 @@
 use libc::size_t;
 use std::ptr::null;
 
+use crate::c_structs::Freeable;
 use crate::rpu::extension_metadata::DmData as RuDmData;
 use crate::rpu::extension_metadata::WithExtMetadataBlocks;
 use crate::rpu::extension_metadata::blocks::*;
 use crate::rpu::vdr_dm_data::CmVersion;
+
+use super::Data;
 
 /// C struct for the list of ext_metadata_block()
 #[repr(C)]
@@ -24,6 +27,7 @@ pub struct DmData {
     level11: *const ExtMetadataBlockLevel11,
     level254: *const ExtMetadataBlockLevel254,
     level255: *const ExtMetadataBlockLevel255,
+    level253: *const Data,
 }
 
 #[repr(C)]
@@ -106,6 +110,10 @@ impl DmData {
                     self.level11 =
                         Box::into_raw(Box::new(b.clone())) as *const ExtMetadataBlockLevel11
                 }
+                ExtMetadataBlock::Level253(b) => {
+                    self.level253 =
+                        Box::into_raw(Box::new(Data::from(b.bytes.clone()))) as *const Data;
+                }
                 ExtMetadataBlock::Level254(b) => {
                     self.level254 =
                         Box::into_raw(Box::new(b.clone())) as *const ExtMetadataBlockLevel254
@@ -156,6 +164,10 @@ impl DmData {
             if !self.level11.is_null() {
                 drop(Box::from_raw(self.level11 as *mut ExtMetadataBlockLevel11));
             }
+            if !self.level253.is_null() {
+                let data = Box::from_raw(self.level253 as *mut Data);
+                data.free();
+            }
             if !self.level254.is_null() {
                 drop(Box::from_raw(
                     self.level254 as *mut ExtMetadataBlockLevel254,
@@ -184,6 +196,7 @@ impl Default for DmData {
             level9: null(),
             level10: Default::default(),
             level11: null(),
+            level253: null(),
             level254: null(),
             level255: null(),
         }

@@ -52,6 +52,8 @@ pub struct RpusListSummary {
 }
 
 pub struct SummaryL1Stats {
+    pub max_pq_value: f64,
+
     pub maxcll: f64,
     pub maxcll_avg: f64,
 
@@ -360,6 +362,8 @@ impl RpusListSummary {
         let avg_pq_mean_value = l1_data.iter().map(|e| e.avg).sum::<f64>() / l1_data.len() as f64;
 
         let l1_stats = SummaryL1Stats {
+            max_pq_value,
+
             maxcll: pq_to_nits(max_pq_value),
             maxcll_avg: pq_to_nits(max_pq_mean_value),
             maxfall: pq_to_nits(max_avg_pq_value),
@@ -654,5 +658,60 @@ impl RpusListSummary {
             max,
             avg: sum / data.len() as f64,
         }
+    }
+}
+
+impl SummaryTrimsStats {
+    fn stats_iter(&self) -> impl Iterator<Item = &AggregateStats> {
+        std::iter::once(Some(&self.slope))
+            .chain(std::iter::once(Some(&self.offset)))
+            .chain(std::iter::once(Some(&self.power)))
+            .chain(std::iter::once(Some(&self.chroma)))
+            .chain(std::iter::once(Some(&self.saturation)))
+            .chain(std::iter::once(Some(&self.ms_weight)))
+            .chain(std::iter::once(self.target_mid_contrast.as_ref()))
+            .chain(std::iter::once(self.clip_trim.as_ref()))
+            .flatten()
+    }
+
+    pub fn global_min_max(&self) -> (f64, f64) {
+        let min = self
+            .stats_iter()
+            .map(|e| e.min)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let max = self
+            .stats_iter()
+            .map(|e| e.max)
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+
+        (min, max)
+    }
+}
+
+impl SummaryL8VectorStats {
+    fn stats_iter(&self) -> impl Iterator<Item = &AggregateStats> {
+        std::iter::once(&self.red)
+            .chain(std::iter::once(&self.yellow))
+            .chain(std::iter::once(&self.green))
+            .chain(std::iter::once(&self.cyan))
+            .chain(std::iter::once(&self.blue))
+            .chain(std::iter::once(&self.magenta))
+    }
+
+    pub fn global_min_max(&self) -> (f64, f64) {
+        let min = self
+            .stats_iter()
+            .map(|e| e.min)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let max = self
+            .stats_iter()
+            .map(|e| e.max)
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+
+        (min, max)
     }
 }

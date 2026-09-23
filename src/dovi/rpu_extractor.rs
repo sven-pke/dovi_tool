@@ -1,24 +1,52 @@
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
-
-use anyhow::{Result, bail};
+use anyhow::Result;
 use indicatif::ProgressBar;
+use std::fs::File;
+use std::io::{BufRead, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
-use dolby_vision::rpu::dovi_rpu::DoviRpu;
+use crate::{commands::ExtractRpuArgs, dovi::general_read_write::DoviProcessorError};
 
-use crate::commands::ExtractRpuArgs;
-
-use super::av1_parser::{
-    Obu, extract_dovi_t35_payload, read_ivf_frame_header, read_obus_from_ivf_frame,
-    try_read_ivf_file_header,
+use super::{
+    CliOptions, IoFormat,
+    general_read_write::{self, DoviProcessorOptions},
+    input_from_either,
 };
-use super::input_from_either;
+use general_read_write::{DoviProcessor, DoviWriter};
+
+use super::av1::{
+    BitstreamCodec, MatroskaAv1Reader, OBU_TEMPORAL_DELIMITER, Obu, detect_codec,
+    extract_dovi_t35_payload, is_dovi_rpu_obu, is_stdin, matroska_video_codec, open_input,
+    read_ivf_frame_header, read_obus_from_ivf_frame, try_read_ivf_file_header,
+};
+
+/// Collect the Dolby Vision RPUs carried by one temporal unit, encoded the way
+/// the RPU file wants them.
+fn collect_rpus(obus: &[Obu], rpus: &mut Vec<Vec<u8>>) -> Result<()> {
+    for obu in obus {
+        if let Some(t35_payload) =
+            extract_dovi_t35_payload(&obu.payload).filter(|_| is_dovi_rpu_obu(obu))
+        {
+            let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35_payload)?;
+            rpus.push(rpu.write_hevc_unspec62_nalu()?);
+        }
+    }
+
+    Ok(())
+}
+use dolby_vision::rpu::dovi_rpu::DoviRpu;
+use hevc_parser::hevc::{NAL_UNSPEC62, NALUnit};
+use hevc_parser::io::StartCodePreset;
 
 pub struct RpuExtractor {
+    format: IoFormat,
     input: PathBuf,
     rpu_out: PathBuf,
     limit: Option<u64>,
+    track_number: Option<usize>,
+}
+
+fn is_av1_input(path: &Path) -> bool {
+    !is_stdin(path) && detect_codec(path) == BitstreamCodec::Av1
 }
 
 impl RpuExtractor {
@@ -28,116 +56,196 @@ impl RpuExtractor {
             input_pos,
             rpu_out,
             limit,
+            track_number,
         } = args;
 
         let input = input_from_either("extract-rpu", input, input_pos)?;
 
-        let rpu_out = rpu_out.unwrap_or_else(|| PathBuf::from("RPU.bin"));
+        // For AV1 inputs use a dummy format; for HEVC use the existing detection
+        let format = if is_av1_input(&input) {
+            IoFormat::Raw
+        } else {
+            hevc_parser::io::format_from_path(&input)?
+        };
+
+        let rpu_out = match rpu_out {
+            Some(path) => path,
+            None => PathBuf::from("RPU.bin"),
+        };
 
         Ok(Self {
+            format,
             input,
             rpu_out,
             limit,
+            track_number,
         })
     }
 
-    pub fn extract_rpu(args: ExtractRpuArgs, _options: super::CliOptions) -> Result<()> {
-        let extractor = RpuExtractor::from_args(args)?;
-        let pb = super::initialize_progress_bar(&extractor.input)?;
-        extractor.process_input(pb)
+    pub fn extract_rpu(args: ExtractRpuArgs, options: CliOptions) -> Result<()> {
+        let rpu_extractor = RpuExtractor::from_args(args)?;
+        rpu_extractor.process_input(options)
     }
 
-    fn process_input(&self, pb: ProgressBar) -> Result<()> {
-        let file = File::open(&self.input)?;
-        let mut reader = BufReader::with_capacity(100_000, file);
+    fn process_input(&self, options: CliOptions) -> Result<()> {
+        // Matroska needs the container reader rather than an elementary stream
+        if self.format == IoFormat::Matroska
+            && matroska_video_codec(&self.input) == Some(BitstreamCodec::Av1)
+        {
+            return self.extract_rpu_from_av1_matroska();
+        }
 
-        let mut rpus: Vec<DoviRpu> = Vec::new();
-        let mut obu_count = 0u64;
+        let (codec, mut reader) = open_input(&self.input)?;
 
-        if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
-            // IVF: one temporal unit per frame
-            let _ = ivf_header;
-            loop {
-                let fh = match read_ivf_frame_header(&mut reader)? {
-                    Some(h) => h,
-                    None => break,
-                };
-                let mut frame_data = vec![0u8; fh.frame_size as usize];
-                reader.read_exact(&mut frame_data)?;
+        match codec {
+            BitstreamCodec::Av1 => self.extract_rpu_from_av1(&mut reader),
+            BitstreamCodec::Hevc => {
+                let pb = super::initialize_progress_bar(&self.format, &self.input)?;
+                self.extract_rpu_from_el(pb, options, reader)
+            }
+        }
+    }
 
-                let obus = read_obus_from_ivf_frame(frame_data)?;
-                for obu in &obus {
-                    if let Some(t35) = extract_dovi_t35_payload(&obu.payload) {
-                        let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35)?;
-                        rpus.push(rpu);
-                    }
+    fn extract_rpu_from_av1(&self, reader: &mut dyn BufRead) -> Result<()> {
+        println!("Extracting RPU from AV1 bitstream...");
 
-                    obu_count += 1;
-                    if let Some(lim) = self.limit {
-                        if obu_count >= lim {
-                            break;
-                        }
-                    }
-                }
+        // Sized handle over the trait object, so the generic readers accept it
+        let mut reader = reader;
 
-                pb.inc(fh.frame_size as u64 / 100_000_000 + 1);
+        let mut rpus: Vec<Vec<u8>> = Vec::new();
+        let mut tu_count: u64 = 0;
 
-                if self.limit.map(|l| obu_count >= l).unwrap_or(false) {
+        // Detect IVF container by peeking at first bytes
+        if try_read_ivf_file_header(&mut reader)?.is_some() {
+            // IVF container: one temporal unit per IVF frame
+            while let Some(frame_hdr) = read_ivf_frame_header(&mut reader)? {
+                if self.limit.is_some_and(|limit| tu_count >= limit) {
                     break;
                 }
+
+                let mut frame_data = vec![0u8; frame_hdr.frame_size as usize];
+                reader.read_exact(&mut frame_data)?;
+
+                collect_rpus(&read_obus_from_ivf_frame(frame_data)?, &mut rpus)?;
+
+                tu_count += 1;
             }
         } else {
-            // Raw OBU stream
+            // Raw AV1 bitstream: temporal units are delimited by OBU_TEMPORAL_DELIMITER
+            let mut tu: Vec<Obu> = Vec::new();
+
             loop {
-                match Obu::read_from(&mut reader) {
-                    Ok(Some(obu)) => {
-                        pb.inc(obu.raw_bytes.len() as u64 / 100_000_000 + 1);
+                let obu = Obu::read_from(&mut reader)?;
+                let starts_new_tu = obu
+                    .as_ref()
+                    .is_some_and(|o| o.obu_type == OBU_TEMPORAL_DELIMITER);
 
-                        if let Some(t35) = extract_dovi_t35_payload(&obu.payload) {
-                            let rpu = DoviRpu::parse_itu_t35_dovi_metadata_obu(t35)?;
-                            rpus.push(rpu);
-                        }
+                if (obu.is_none() || starts_new_tu) && !tu.is_empty() {
+                    collect_rpus(&tu, &mut rpus)?;
+                    tu.clear();
 
-                        obu_count += 1;
-                        if let Some(lim) = self.limit {
-                            if obu_count >= lim {
-                                break;
-                            }
-                        }
+                    tu_count += 1;
+
+                    if self.limit.is_some_and(|limit| tu_count >= limit) {
+                        break;
                     }
-                    Ok(None) => break,
-                    Err(e) => return Err(e),
+                }
+
+                match obu {
+                    None => break,
+                    Some(obu) => tu.push(obu),
                 }
             }
         }
 
-        pb.finish_and_clear();
-
-        if rpus.is_empty() {
-            bail!("No Dolby Vision RPU data found in input");
-        }
-
-        println!("Found {} RPU(s). Writing RPU file...", rpus.len());
-        self.write_rpu_file(&rpus)?;
-
-        Ok(())
+        println!("Found {} RPU(s).", rpus.len());
+        self.write_av1_rpu_file(&rpus)
     }
 
-    fn write_rpu_file(&self, rpus: &[DoviRpu]) -> Result<()> {
+    fn extract_rpu_from_av1_matroska(&self) -> Result<()> {
+        println!("Extracting RPU from AV1 bitstream...");
+
+        let mut mkv = MatroskaAv1Reader::open(&self.input)?;
+
+        let mut rpus: Vec<Vec<u8>> = Vec::new();
+        let mut tu_count: u64 = 0;
+
+        while let Some(obus) = mkv.next_temporal_unit()? {
+            if self.limit.is_some_and(|limit| tu_count >= limit) {
+                break;
+            }
+
+            collect_rpus(&obus, &mut rpus)?;
+
+            tu_count += 1;
+        }
+
+        println!("Found {} RPU(s).", rpus.len());
+        self.write_av1_rpu_file(&rpus)
+    }
+
+    fn write_av1_rpu_file(&self, rpus: &[Vec<u8>]) -> Result<()> {
+        // An empty RPU file with a success exit would read as "extracted";
+        // the HEVC path refuses in this case, and so does this one.
+        if rpus.is_empty() {
+            return Err(DoviProcessorError::NoRpuFound.into());
+        }
+
+        println!("Writing RPU file...");
         let mut writer = BufWriter::with_capacity(
             100_000,
-            File::create(&self.rpu_out).expect("Can't create RPU output file"),
+            File::create(&self.rpu_out).expect("Can't create file"),
         );
 
-        for rpu in rpus {
-            // write_hevc_unspec62_nalu returns [7C 01 <RPU bytes starting with 0x19>]
-            // parse_rpu_file expects [00 00 00 01 19 ...] — skip the 2-byte 7C 01 header
-            let encoded = rpu.write_hevc_unspec62_nalu()?;
-            writer.write_all(&[0x00, 0x00, 0x00, 0x01])?;
-            writer.write_all(&encoded[2..])?;
+        for encoded_rpu in rpus {
+            // encoded_rpu is write_hevc_unspec62_nalu() output: starts with 0x7C 0x01
+            // Same format as HEVC path: [00 00 00 01] + rpu[2..]
+            NALUnit::write_with_preset(
+                &mut writer,
+                &encoded_rpu[2..],
+                StartCodePreset::Four,
+                NAL_UNSPEC62,
+                true,
+            )?;
         }
 
         writer.flush()?;
         Ok(())
+    }
+
+    fn extract_rpu_from_el(
+        &self,
+        pb: ProgressBar,
+        options: CliOptions,
+        mut reader: Box<dyn BufRead>,
+    ) -> Result<()> {
+        let rpu_out = self.rpu_out.as_path();
+
+        let dovi_writer = DoviWriter::new(None, None, Some(rpu_out), None);
+        let mut dovi_processor = DoviProcessor::new(
+            options,
+            self.input.clone(),
+            dovi_writer,
+            pb,
+            DoviProcessorOptions {
+                limit: self.limit,
+                track_number: self.track_number,
+            },
+        );
+
+        let res = match self.format {
+            // The container processor needs to seek, so it reopens the file
+            IoFormat::Matroska => dovi_processor.read_write_from_io(&self.format),
+            _ => dovi_processor.read_write_from_reader(&self.format, &mut reader),
+        };
+
+        if res.as_ref().is_err_and(|err| {
+            err.downcast_ref::<DoviProcessorError>()
+                .is_some_and(|e| matches!(e, DoviProcessorError::NoRpuFound))
+        }) {
+            std::fs::remove_file(rpu_out)?;
+        }
+
+        res
     }
 }

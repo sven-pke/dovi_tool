@@ -6,9 +6,7 @@ use bitvec_helpers::{
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::extension_metadata::blocks::{
-    ExtMetadataBlock, ExtMetadataBlockLevel9, ExtMetadataBlockLevel11,
-};
+use super::extension_metadata::blocks::ExtMetadataBlock;
 use super::extension_metadata::*;
 use super::generate::{GenerateConfig, GenerateProfile};
 use super::profiles::DoviProfile;
@@ -102,12 +100,11 @@ pub(crate) fn vdr_dm_data_payload(
         vdr_dm_data.cmv29_metadata = Some(DmData::V29(cmv29_dm_data));
     }
 
-    if reader.available()? >= DM_DATA_PAYLOAD2_MIN_BITS {
-        if let Some(cmv40_dm_data) =
+    if reader.available()? >= DM_DATA_PAYLOAD2_MIN_BITS
+        && let Some(cmv40_dm_data) =
             DmData::parse::<CmV40DmData>(reader).with_context(|| CmV40DmData::VERSION)?
-        {
-            vdr_dm_data.cmv40_metadata = Some(DmData::V40(cmv40_dm_data));
-        }
+    {
+        vdr_dm_data.cmv40_metadata = Some(DmData::V40(cmv40_dm_data));
     }
 
     Ok(vdr_dm_data)
@@ -392,6 +389,7 @@ impl VdrDmData {
                 }
             }
             ExtMetadataBlock::Level11(_) => self.replace_metadata_level(block),
+            ExtMetadataBlock::Level253(_) => self.replace_metadata_level(block),
             ExtMetadataBlock::Level254(_) => self.replace_metadata_level(block),
             ExtMetadataBlock::Level255(_) => self.replace_metadata_level(block),
             ExtMetadataBlock::Reserved(_) => bail!("Cannot replace specific reserved block"),
@@ -486,33 +484,24 @@ impl VdrDmData {
         .with_cmv29_dm_data();
 
         if config.cm_version == CmVersion::V40 {
-            vdr_dm_data.cmv40_metadata = if let Some(level254) = &config.level254 {
-                Some(DmData::V40(CmV40DmData::new_with_custom_l254(level254)))
-            } else {
-                Some(DmData::V40(CmV40DmData::new_with_l254_402()))
+            vdr_dm_data.cmv40_metadata = Some(DmData::V40(CmV40DmData::default_safe()));
+            if let Some(level254) = &config.level254 {
+                vdr_dm_data.replace_metadata_block(ExtMetadataBlock::Level254(level254.clone()))?;
             }
         }
 
-        vdr_dm_data.set_static_metadata(config)?;
+        vdr_dm_data.set_generate_default_metadata(config)?;
         vdr_dm_data.change_source_levels(config.source_min_pq, config.source_max_pq);
 
         Ok(vdr_dm_data)
     }
 
-    pub fn set_static_metadata(&mut self, config: &GenerateConfig) -> Result<()> {
+    pub(crate) fn set_generate_default_metadata(&mut self, config: &GenerateConfig) -> Result<()> {
         self.replace_metadata_block(ExtMetadataBlock::Level5(config.level5.clone()))?;
 
         if let Some(level6) = &config.level6 {
             self.replace_metadata_block(ExtMetadataBlock::Level6(level6.clone()))?;
         }
-
-        // Default to inserting both L9 (required) and L11 metadata
-        self.replace_metadata_block(ExtMetadataBlock::Level9(
-            ExtMetadataBlockLevel9::default_dci_p3(),
-        ))?;
-        self.replace_metadata_block(ExtMetadataBlock::Level11(
-            ExtMetadataBlockLevel11::default_reference_cinema(),
-        ))?;
 
         if !config.default_metadata_blocks.is_empty() {
             const LEVEL_BLOCK_LIST: &[u8] = &[5, 6];

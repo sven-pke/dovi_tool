@@ -141,7 +141,7 @@ impl Generator {
         self.config = Some(config);
 
         if let Some(config) = self.config.as_mut() {
-            println!("Generating metadata: {}...", &config.profile);
+            println!("Generating metadata: {}...", config.profile);
 
             // Correct L1 for sources other than XML
             if self.xml_path.is_none() {

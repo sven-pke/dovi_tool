@@ -1,24 +1,32 @@
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
-
 use anyhow::Result;
+use indicatif::ProgressBar;
+use std::fs::File;
+use std::io::{BufRead, BufWriter};
+use std::path::{Path, PathBuf};
 
 use crate::commands::RemoveArgs;
 
-use super::av1_parser::{
-    Obu, is_dovi_rpu_obu, read_ivf_frame_header, read_obus_from_ivf_frame,
-    try_read_ivf_file_header, write_ivf_frame_header,
+use super::av1::{
+    BitstreamCodec, IvfWriter, MatroskaAv1Reader, Obu, ObuWriter, detect_codec, is_dovi_rpu_obu,
+    is_stdin, matroska_video_codec, open_input, read_ivf_frame_header, read_obus_from_ivf_frame,
+    try_read_ivf_file_header,
 };
-use super::input_from_either;
+use super::{CliOptions, IoFormat, general_read_write, input_from_either};
+
+use general_read_write::{DoviProcessor, DoviWriter};
+
+fn is_av1_input(path: &Path) -> bool {
+    !is_stdin(path) && detect_codec(path) == BitstreamCodec::Av1
+}
 
 pub struct Remover {
+    format: IoFormat,
     input: PathBuf,
     output: PathBuf,
 }
 
 impl Remover {
-    pub fn remove(args: RemoveArgs, _options: super::CliOptions) -> Result<()> {
+    pub fn from_args(args: RemoveArgs) -> Result<Self> {
         let RemoveArgs {
             input,
             input_pos,
@@ -26,65 +34,151 @@ impl Remover {
         } = args;
 
         let input = input_from_either("remove", input, input_pos)?;
-        let output = output.unwrap_or_else(|| PathBuf::from("BL.av1"));
 
-        let pb = super::initialize_progress_bar(&input)?;
+        let (format, default_output) = if is_av1_input(&input) {
+            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("av1");
+            (IoFormat::Raw, PathBuf::from(format!("BL_no_dovi.{ext}")))
+        } else {
+            let format = hevc_parser::io::format_from_path(&input)?;
 
-        let remover = Remover { input, output };
-        let res = remover.process_input();
+            // Matroska is unwrapped into a raw stream, so the result of an AV1
+            // track is raw AV1 rather than a copy of the container extension
+            let default = if format == IoFormat::Matroska
+                && matroska_video_codec(&input) == Some(BitstreamCodec::Av1)
+            {
+                PathBuf::from("BL_no_dovi.av1")
+            } else {
+                PathBuf::from("BL.hevc")
+            };
 
-        pb.finish_and_clear();
-        res
+            (format, default)
+        };
+
+        let output = output.unwrap_or(default_output);
+
+        Ok(Self {
+            format,
+            input,
+            output,
+        })
     }
 
-    fn process_input(&self) -> Result<()> {
-        let file = File::open(&self.input)?;
-        let mut reader = BufReader::with_capacity(100_000, file);
+    pub fn remove(args: RemoveArgs, options: CliOptions) -> Result<()> {
+        let remover = Remover::from_args(args)?;
+        remover.process_input(options)
+    }
 
-        let out_file = File::create(&self.output).expect("Can't create output file");
-        let mut writer = BufWriter::with_capacity(100_000, out_file);
+    fn process_input(&self, options: CliOptions) -> Result<()> {
+        // Matroska needs the container reader rather than an elementary stream
+        if self.format == IoFormat::Matroska
+            && matroska_video_codec(&self.input) == Some(BitstreamCodec::Av1)
+        {
+            return self.remove_from_av1_matroska();
+        }
+
+        let (codec, mut reader) = open_input(&self.input)?;
+
+        if let BitstreamCodec::Av1 = codec {
+            return self.remove_from_av1(&mut reader);
+        }
+
+        let pb = super::initialize_progress_bar(&self.format, &self.input)?;
+
+        if self.format == IoFormat::Matroska {
+            println!("Remover: Matroska input is experimental!");
+        }
+
+        self.remove_from_hevc(pb, options, reader)
+    }
+
+    fn remove_from_av1(&self, reader: &mut dyn BufRead) -> Result<()> {
+        println!("Removing DoVi RPU from AV1 bitstream...");
+
+        // Sized handle over the trait object, so the generic readers accept it
+        let mut reader = reader;
 
         if let Some(ivf_header) = try_read_ivf_file_header(&mut reader)? {
-            // IVF: pass file header through, then remove DoVi OBUs per frame
-            writer.write_all(&ivf_header)?;
+            // IVF container
+            let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
+            let mut ivf_writer = IvfWriter::new(out_file, &ivf_header)?;
 
-            loop {
-                let fh = match read_ivf_frame_header(&mut reader)? {
-                    Some(h) => h,
-                    None => break,
-                };
-
-                let mut frame_data = vec![0u8; fh.frame_size as usize];
+            while let Some(frame_hdr) = read_ivf_frame_header(&mut reader)? {
+                let mut frame_data = vec![0u8; frame_hdr.frame_size as usize];
                 reader.read_exact(&mut frame_data)?;
 
                 let obus = read_obus_from_ivf_frame(frame_data)?;
+                let mut new_frame: Vec<u8> = Vec::new();
 
-                // Collect output OBUs (skip Dolby Vision RPU)
-                let output_frame: Vec<u8> = obus
-                    .iter()
-                    .filter(|o| !is_dovi_rpu_obu(o))
-                    .flat_map(|o| o.raw_bytes.iter().copied())
-                    .collect();
-
-                write_ivf_frame_header(&mut writer, output_frame.len() as u32, fh.timestamp)?;
-                writer.write_all(&output_frame)?;
-            }
-        } else {
-            // Raw OBU stream: skip Dolby Vision RPU OBUs, copy everything else
-            loop {
-                match Obu::read_from(&mut reader) {
-                    Ok(Some(obu)) => {
-                        if !is_dovi_rpu_obu(&obu) {
-                            writer.write_all(&obu.raw_bytes)?;
-                        }
+                for obu in &obus {
+                    if !is_dovi_rpu_obu(obu) {
+                        new_frame.extend_from_slice(&obu.raw_bytes);
                     }
-                    Ok(None) => break,
-                    Err(e) => return Err(e),
                 }
+
+                ivf_writer.write_frame(frame_hdr.timestamp, &new_frame)?;
+            }
+
+            ivf_writer.flush()?;
+        } else {
+            // Raw AV1 bitstream
+            let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
+            let mut obu_writer = ObuWriter::new(out_file);
+
+            while let Some(obu) = Obu::read_from(&mut reader)? {
+                if !is_dovi_rpu_obu(&obu) {
+                    obu_writer.write_raw(&obu.raw_bytes)?;
+                }
+            }
+
+            obu_writer.flush()?;
+        }
+
+        println!("Done.");
+        Ok(())
+    }
+
+    /// Strip the Dolby Vision RPUs out of a Matroska AV1 track and write the
+    /// result as a raw AV1 stream.
+    fn remove_from_av1_matroska(&self) -> Result<()> {
+        println!("Removing DoVi RPU from AV1 bitstream...");
+
+        let mut mkv = MatroskaAv1Reader::open(&self.input)?;
+        let out_file = BufWriter::new(File::create(&self.output).expect("Can't create file"));
+        let mut obu_writer = ObuWriter::new(out_file);
+
+        while let Some(obus) = mkv.next_temporal_unit()? {
+            for obu in obus.iter().filter(|o| !is_dovi_rpu_obu(o)) {
+                obu_writer.write_raw(&obu.raw_bytes)?;
             }
         }
 
-        writer.flush()?;
+        obu_writer.flush()?;
+
+        println!("Done.");
         Ok(())
+    }
+
+    fn remove_from_hevc(
+        &self,
+        pb: ProgressBar,
+        options: CliOptions,
+        mut reader: Box<dyn BufRead>,
+    ) -> Result<()> {
+        let bl_out = Some(self.output.as_path());
+
+        let dovi_writer = DoviWriter::new(bl_out, None, None, None);
+        let mut dovi_processor = DoviProcessor::new(
+            options,
+            self.input.clone(),
+            dovi_writer,
+            pb,
+            Default::default(),
+        );
+
+        match self.format {
+            // The container processor needs to seek, so it reopens the file
+            IoFormat::Matroska => dovi_processor.read_write_from_io(&self.format),
+            _ => dovi_processor.read_write_from_reader(&self.format, &mut reader),
+        }
     }
 }

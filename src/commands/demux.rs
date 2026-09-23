@@ -2,10 +2,10 @@ use clap::{Args, ValueHint};
 use std::path::PathBuf;
 
 #[derive(Args, Debug)]
-pub struct RemoveArgs {
+pub struct DemuxArgs {
     #[arg(
         id = "input",
-        help = "Sets the input file to use (.hevc, .av1, .ivf), or piped with -",
+        help = "Sets the input HEVC file to use, or piped with -",
         long,
         short = 'i',
         conflicts_with = "input_pos",
@@ -16,7 +16,7 @@ pub struct RemoveArgs {
 
     #[arg(
         id = "input_pos",
-        help = "Sets the input file to use (.hevc, .av1, .ivf), or piped with - (positional)",
+        help = "Sets the input HEVC file to use, or piped with - (positional)",
         conflicts_with = "input",
         required_unless_present = "input",
         value_hint = ValueHint::FilePath
@@ -25,9 +25,20 @@ pub struct RemoveArgs {
 
     #[arg(
         long,
-        short = 'o',
-        help = "Base layer output file location",
+        short = 'b',
+        help = "BL output file location",
         value_hint = ValueHint::FilePath
     )]
-    pub output: Option<PathBuf>,
+    pub bl_out: Option<PathBuf>,
+
+    #[arg(
+        long,
+        short = 'e',
+        help = "EL output file location",
+        value_hint = ValueHint::FilePath
+    )]
+    pub el_out: Option<PathBuf>,
+
+    #[arg(long, help = "Output the EL file only")]
+    pub el_only: bool,
 }

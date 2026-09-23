@@ -177,10 +177,7 @@ impl RpuDataHeader {
 
     pub fn get_dovi_profile(&self) -> u8 {
         match self.vdr_rpu_profile {
-            0 => {
-                // Profile 5 is full range
-                if self.bl_video_full_range_flag { 5 } else { 0 }
-            }
+            0 if self.bl_video_full_range_flag => 5, // Profile 5 is full range
             1 => {
                 // 4, 7 or 8
                 if self.el_spatial_resampling_filter_flag && !self.disable_residual_flag {

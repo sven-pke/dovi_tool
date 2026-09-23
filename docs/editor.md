@@ -141,5 +141,11 @@ The editor expects a JSON config like the example below:
     //
     // Default: false
     "allow_cmv4_transfer": boolean,
+
+    // UNSAFE: Adds default CMv4.0 extension metadata (L3, L9, L11, L254) to the RPU.
+    // Does nothing if CMv4.0 metadata is already present.
+    //
+    // Intended for advanced usage only, disables some CM v2.9 metadata.
+    "add_cmv4_default_metadata":  boolean
 }
 ```

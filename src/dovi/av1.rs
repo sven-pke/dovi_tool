@@ -1,10 +1,12 @@
 // Re-export everything the rest of the codebase uses from the av1_parser crate
+#[allow(unused_imports)]
 pub use av1_parser::{
-    IvfFrameHeader, IvfWriter, Obu, ObuReader, ObuWriter,
-    OBU_TEMPORAL_DELIMITER, OBU_METADATA,
-    encode_leb128, decode_leb128,
-    try_read_ivf_file_header, read_ivf_frame_header, write_ivf_frame_header,
-    read_obus_from_ivf_frame,
+    BitstreamCodec, IVF_SIGNATURE, IvfFrameHeader, IvfWriter, MatroskaAv1Reader, OBU_FRAME,
+    OBU_FRAME_HEADER, OBU_METADATA, OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER,
+    OBU_TEMPORAL_DELIMITER, OBU_TRAILING_BITS_BYTE, Obu, ObuReader, ObuWriter,
+    codec_from_extension, decode_leb128, detect_codec, encode_leb128, is_stdin,
+    matroska_video_codec, metadata_insert_index, open_input, read_ivf_frame_header,
+    read_obus_from_ivf_frame, sniff_codec, try_read_ivf_file_header, write_ivf_frame_header,
 };
 
 use anyhow::Result;
@@ -74,6 +76,7 @@ pub fn is_dovi_rpu_obu(obu: &Obu) -> bool {
 /// metadata_type    (LEB128) = 4
 /// 0xB5             country_code
 /// <EMDF-wrapped RPU payload>
+/// 0x80             trailing_bits()
 /// ```
 pub fn build_dovi_obu(rpu: &DoviRpu) -> Result<Vec<u8>> {
     // write_av1_rpu_metadata_obu_t35_complete returns: 0xB5 + EMDF payload
@@ -82,6 +85,9 @@ pub fn build_dovi_obu(rpu: &DoviRpu) -> Result<Vec<u8>> {
     // OBU_METADATA payload: metadata_type(LEB128=4) + T.35 complete payload
     let mut obu_payload = encode_leb128(METADATA_TYPE_ITUT_T35);
     obu_payload.extend_from_slice(&t35_complete);
+
+    // trailing_bits() — required for every OBU that is not a tile group/list or frame
+    obu_payload.push(OBU_TRAILING_BITS_BYTE);
 
     // OBU header byte:
     //   bit 7:   forbidden = 0

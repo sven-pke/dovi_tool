@@ -66,22 +66,22 @@ impl RpuDataNlq {
             data.vdr_in_max[cmp] = reader.read_var(coefficient_log2_denom_length)?;
 
             // NLQ_LINEAR_DZ
-            if let Some(nlq_method_idc) = mapping.nlq_method_idc {
-                if nlq_method_idc == DoviNlqMethod::LinearDeadzone {
-                    if header.coefficient_data_type == 0 {
-                        data.linear_deadzone_slope_int[cmp] = reader.read_ue()?;
-                    }
-
-                    data.linear_deadzone_slope[cmp] =
-                        reader.read_var(coefficient_log2_denom_length)?;
-
-                    if header.coefficient_data_type == 0 {
-                        data.linear_deadzone_threshold_int[cmp] = reader.read_ue()?;
-                    }
-
-                    data.linear_deadzone_threshold[cmp] =
-                        reader.read_var(coefficient_log2_denom_length)?;
+            if mapping
+                .nlq_method_idc
+                .is_some_and(|nlq_method_idc| nlq_method_idc == DoviNlqMethod::LinearDeadzone)
+            {
+                if header.coefficient_data_type == 0 {
+                    data.linear_deadzone_slope_int[cmp] = reader.read_ue()?;
                 }
+
+                data.linear_deadzone_slope[cmp] = reader.read_var(coefficient_log2_denom_length)?;
+
+                if header.coefficient_data_type == 0 {
+                    data.linear_deadzone_threshold_int[cmp] = reader.read_ue()?;
+                }
+
+                data.linear_deadzone_threshold[cmp] =
+                    reader.read_var(coefficient_log2_denom_length)?;
             }
         }
 
@@ -124,27 +124,28 @@ impl RpuDataNlq {
 
             writer.write_var(coefficient_log2_denom_length, self.vdr_in_max[cmp])?;
 
-            if let Some(nlq_method_idc) = mapping.nlq_method_idc {
-                if nlq_method_idc == DoviNlqMethod::LinearDeadzone {
-                    // NLQ_LINEAR_DZ
-                    if header.coefficient_data_type == 0 {
-                        writer.write_ue(self.linear_deadzone_slope_int[cmp])?;
-                    }
-
-                    writer.write_var(
-                        coefficient_log2_denom_length,
-                        self.linear_deadzone_slope[cmp],
-                    )?;
-
-                    if header.coefficient_data_type == 0 {
-                        writer.write_ue(self.linear_deadzone_threshold_int[cmp])?;
-                    }
-
-                    writer.write_var(
-                        coefficient_log2_denom_length,
-                        self.linear_deadzone_threshold[cmp],
-                    )?;
+            if mapping
+                .nlq_method_idc
+                .is_some_and(|nlq_method_idc| nlq_method_idc == DoviNlqMethod::LinearDeadzone)
+            {
+                // NLQ_LINEAR_DZ
+                if header.coefficient_data_type == 0 {
+                    writer.write_ue(self.linear_deadzone_slope_int[cmp])?;
                 }
+
+                writer.write_var(
+                    coefficient_log2_denom_length,
+                    self.linear_deadzone_slope[cmp],
+                )?;
+
+                if header.coefficient_data_type == 0 {
+                    writer.write_ue(self.linear_deadzone_threshold_int[cmp])?;
+                }
+
+                writer.write_var(
+                    coefficient_log2_denom_length,
+                    self.linear_deadzone_threshold[cmp],
+                )?;
             }
         }
 

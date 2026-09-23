@@ -5,22 +5,47 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use csv::WriterBuilder;
 use dolby_vision::rpu::extension_metadata::blocks::{ExtMetadataBlock, ExtMetadataBlockLevel5};
 use itertools::Itertools;
-use serde::Serializer;
-use serde::ser::SerializeSeq;
-
-use dolby_vision::rpu::utils::parse_rpu_file;
+use serde::ser::Error;
+use serde::{Serialize, Serializer};
 use serde_json::json;
 
-use crate::commands::{ExportArgs, ExportData};
-use crate::dovi::input_from_either;
+use dolby_vision::rpu::utils::parse_rpu_file;
+
+use crate::commands::{ExportArgs, ExportData, ExportLevel, LevelsOutputFormat};
+use crate::dovi::{
+    editor::{ActiveArea, ActiveAreaOffsets, EditConfig},
+    input_from_either,
+};
 
 use super::DoviRpu;
 
 pub struct Exporter {
     input: PathBuf,
     data: Vec<(ExportData, Option<PathBuf>)>,
+    levels_format: LevelsOutputFormat,
+    levels: Vec<(ExportLevel, Option<PathBuf>)>,
+}
+
+#[derive(Serialize)]
+
+struct JsonRecord<'a> {
+    frame: usize,
+    #[serde(flatten, serialize_with = "serialize_level_block")]
+    block: &'a ExtMetadataBlock,
+}
+
+struct CsvHeaders<'a> {
+    block: &'a ExtMetadataBlock,
+}
+
+#[derive(Serialize)]
+struct CsvRecord<'a> {
+    frame: usize,
+    #[serde(serialize_with = "serialize_level_block")]
+    block: &'a ExtMetadataBlock,
 }
 
 impl Exporter {
@@ -30,12 +55,19 @@ impl Exporter {
             input_pos,
             data,
             output,
+            levels_format,
+            levels,
         } = args;
 
         let input = input_from_either("editor", input, input_pos)?;
-        let mut exporter = Exporter { input, data };
+        let mut exporter = Exporter {
+            input,
+            data,
+            levels_format,
+            levels,
+        };
 
-        if exporter.data.is_empty() {
+        if exporter.data.is_empty() && exporter.levels.is_empty() {
             exporter.data.push((ExportData::All, output));
         }
 
@@ -53,6 +85,18 @@ impl Exporter {
     }
 
     fn execute(&self, rpus: &[DoviRpu]) -> Result<()> {
+        if !self.data.is_empty() {
+            self.export_data(rpus)?;
+        }
+
+        if !self.levels.is_empty() {
+            self.export_levels(rpus)?;
+        }
+
+        Ok(())
+    }
+
+    fn export_data(&self, rpus: &[DoviRpu]) -> Result<()> {
         for (data, maybe_output) in &self.data {
             let out_path = if let Some(out_path) = maybe_output {
                 Cow::Borrowed(out_path)
@@ -75,12 +119,7 @@ impl Exporter {
                     println!("Exporting serialized RPU list...");
 
                     let mut ser = serde_json::Serializer::new(&mut writer);
-                    let mut seq = ser.serialize_seq(Some(rpus.len()))?;
-
-                    for rpu in rpus {
-                        seq.serialize_element(&rpu)?;
-                    }
-                    seq.end()?;
+                    ser.collect_seq(rpus)?;
                 }
                 ExportData::Scenes => {
                     println!("Exporting scenes list...");
@@ -154,31 +193,126 @@ impl Exporter {
         let l5_presets = l5_presets
             .iter()
             .enumerate()
-            .map(|(id, l5)| {
-                json!({
-                    "id": id,
-                    "left": l5.active_area_left_offset,
-                    "right": l5.active_area_right_offset,
-                    "top": l5.active_area_top_offset,
-                    "bottom": l5.active_area_bottom_offset
-                })
-            })
+            .map(|(id, l5)| ActiveAreaOffsets::new(id as u16, l5))
             .collect::<Vec<_>>();
-        let l5_edits = l5_edits.iter().map(|(edit_range, id)| {
-            (
-                format!("{}-{}", edit_range.start, edit_range.end),
-                json!(id),
-            )
-        });
-        let l5_edits = serde_json::Value::Object(l5_edits.collect());
+        let l5_edits = l5_edits
+            .into_iter()
+            .map(|(edit_range, id)| {
+                (
+                    format!("{}-{}", edit_range.start, edit_range.end),
+                    id as u16,
+                )
+            })
+            .collect();
 
-        let edit_config = json!({
-            "crop": true,
-            "presets": l5_presets,
-            "edits": l5_edits,
+        let edit_config = EditConfig::from_active_area(ActiveArea {
+            crop: true,
+            presets: Some(l5_presets),
+            edits: Some(l5_edits),
+            ..Default::default()
         });
         serde_json::to_writer_pretty(writer, &edit_config)?;
 
         Ok(())
+    }
+
+    fn export_levels(&self, rpus: &[DoviRpu]) -> Result<()> {
+        println!(
+            "Exporting extension metadata levels {}...",
+            self.levels.iter().map(|e| e.0.level()).join(", ")
+        );
+
+        for (export_level, maybe_output) in &self.levels {
+            let out_path = if let Some(out_path) = maybe_output {
+                Cow::Borrowed(out_path)
+            } else {
+                Cow::Owned(PathBuf::from(
+                    export_level.default_output_file(self.levels_format),
+                ))
+            };
+
+            let writer_buf_len = 10_000;
+            let mut writer = BufWriter::with_capacity(
+                writer_buf_len,
+                File::create(out_path.as_path()).expect("Can't create file"),
+            );
+
+            let vdr_dm_data_list = rpus.iter().enumerate().filter_map(|(idx, rpu)| {
+                let blocks = rpu
+                    .vdr_dm_data
+                    .as_ref()
+                    .map(|vdr_dm_data| vdr_dm_data.level_blocks_iter(export_level.level()));
+
+                blocks.map(|list| (idx, list))
+            });
+
+            match self.levels_format {
+                LevelsOutputFormat::Json => {
+                    let mut ser = serde_json::Serializer::new(&mut writer);
+                    ser.collect_seq(vdr_dm_data_list.flat_map(|(frame, blocks)| {
+                        blocks.map(move |block| JsonRecord { frame, block })
+                    }))?;
+                }
+                LevelsOutputFormat::Csv => {
+                    let mut writer = WriterBuilder::new().has_headers(false).from_writer(writer);
+                    let mut headers_serialized = false;
+
+                    for (frame, blocks) in vdr_dm_data_list {
+                        for block in blocks {
+                            if !headers_serialized {
+                                let value = CsvHeaders { block };
+                                writer.serialize(value)?;
+                                headers_serialized = true;
+                            }
+
+                            writer.serialize(CsvRecord { frame, block })?;
+                        }
+                    }
+
+                    writer.flush()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn serialize_level_block<S: Serializer>(
+    block: &ExtMetadataBlock,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    block.serialize_inner(serializer)
+}
+
+impl<'a> Serialize for CsvHeaders<'a> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match self.block {
+            ExtMetadataBlock::Level1(b) => json!(b),
+            ExtMetadataBlock::Level2(b) => json!(b),
+            ExtMetadataBlock::Level3(b) => json!(b),
+            ExtMetadataBlock::Level4(b) => json!(b),
+            ExtMetadataBlock::Level5(b) => json!(b),
+            ExtMetadataBlock::Level6(b) => json!(b),
+            ExtMetadataBlock::Level8(b) => json!(b),
+            ExtMetadataBlock::Level9(b) => json!(b),
+            ExtMetadataBlock::Level10(b) => json!(b),
+            ExtMetadataBlock::Level11(b) => json!(b),
+            ExtMetadataBlock::Level253(b) => json!(b),
+            ExtMetadataBlock::Level254(b) => json!(b),
+            ExtMetadataBlock::Level255(b) => json!(b),
+            ExtMetadataBlock::Reserved(b) => json!(b),
+        };
+
+        value
+            .as_object()
+            .ok_or_else(|| S::Error::custom("Failed serializing headers"))
+            .and_then(|value| {
+                let headers = std::iter::once("frame").chain(value.keys().map(String::as_str));
+                serializer.collect_seq(headers)
+            })
     }
 }

@@ -216,22 +216,18 @@ fn sei_suffix_before_rpu() -> Result<()> {
 
     // Demux
     let output_bl = temp.child("BL.hevc");
-    let output_el = temp.child("EL.hevc");
 
     let mut cmd = cargo::cargo_bin_cmd!();
     let assert = cmd
-        .arg("demux")
+        .arg("remove")
         .arg(input_file)
-        .arg("--bl-out")
+        .arg("--output")
         .arg(output_bl.as_ref())
-        .arg("--el-out")
-        .arg(output_el.as_ref())
         .assert();
 
     assert.success().stderr(predicate::str::is_empty());
 
     output_bl.assert(predicate::path::is_file());
-    output_el.assert(predicate::path::is_file());
 
     // Extract RPU
     let output_rpu = temp.child("RPU.bin");

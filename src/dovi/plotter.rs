@@ -9,7 +9,10 @@ use dolby_vision::rpu::extension_metadata::blocks::{
 };
 use dolby_vision::rpu::utils::parse_rpu_file;
 use dolby_vision::utils::{nits_to_pq, pq_to_nits};
-use plotters::coord::ranged1d::{KeyPointHint, NoDefaultFormatting, Ranged, ValueFormatter};
+use plotters::coord::combinators::IntoLinspace;
+use plotters::coord::ranged1d::{
+    KeyPointHint, LightPoints, NoDefaultFormatting, Ranged, ValueFormatter,
+};
 use plotters::coord::types::RangedCoordusize;
 use plotters::prelude::{
     AreaSeries, BitMapBackend, Cartesian2d, ChartBuilder, ChartContext, IntoDrawingArea,
@@ -39,16 +42,17 @@ const COLORS: [RGBColor; 8] = [
     RGBColor(249, 115, 22), // orange
     RGBColor(139, 92, 246), // purple
 ];
+const L2_L8_TRIMS_STATS_MAX: f64 = 4096.0;
+const L2_L8_VEC_STATS_MAX: f64 = 256.0;
 
 pub struct Plotter {
     input: PathBuf,
 }
 
 pub struct PlotCoord {
+    plot_type: PlotType,
     key_points: Vec<f64>,
     range: Range<f64>,
-    mapper: fn(&f64, (i32, i32)) -> i32,
-    formatter: fn(&f64) -> String,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,14 @@ struct Series<'a, T> {
     identifier: &'static str,
     stats: &'a AggregateStats,
     mapper: fn(&T) -> f64,
+}
+
+const fn trims_normalize(v: f64) -> f64 {
+    v / L2_L8_TRIMS_STATS_MAX
+}
+
+const fn vector_normalize(v: f64) -> f64 {
+    v / L2_L8_VEC_STATS_MAX
 }
 
 impl Plotter {
@@ -148,7 +160,7 @@ impl Plotter {
             .x_label_area_size(60)
             .y_label_area_size(60)
             .margin_top(90)
-            .build_cartesian_2d(x_spec, PlotCoord::from(plot_type))?;
+            .build_cartesian_2d(x_spec, PlotCoord::new(plot_type, &summary))?;
 
         chart
             .configure_mesh()
@@ -304,7 +316,7 @@ impl Plotter {
             });
         chart
             .draw_series(min_series)?
-            .label(format!("Minimum (max: {:.06} nits)", l1_stats.max_min_nits,))
+            .label(format!("Minimum (max: {:.06} nits)", l1_stats.max_min_nits))
             .legend(|(x, y)| {
                 PathElement::new(
                     vec![(x, y), (x + 20, y)],
@@ -382,32 +394,32 @@ impl Plotter {
             Series {
                 identifier: "red",
                 stats: &stats.red,
-                mapper: |e| e.saturation_vector_field0 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field0 as f64),
             },
             Series {
                 identifier: "yellow",
                 stats: &stats.yellow,
-                mapper: |e| e.saturation_vector_field1 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field1 as f64),
             },
             Series {
                 identifier: "green",
                 stats: &stats.green,
-                mapper: |e| e.saturation_vector_field2 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field2 as f64),
             },
             Series {
                 identifier: "cyan",
                 stats: &stats.cyan,
-                mapper: |e| e.saturation_vector_field3 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field3 as f64),
             },
             Series {
                 identifier: "blue",
                 stats: &stats.blue,
-                mapper: |e| e.saturation_vector_field4 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field4 as f64),
             },
             Series {
                 identifier: "magenta",
                 stats: &stats.magenta,
-                mapper: |e| e.saturation_vector_field5 as f64,
+                mapper: |e| vector_normalize(e.saturation_vector_field5 as f64),
             },
         ];
 
@@ -425,32 +437,32 @@ impl Plotter {
             Series {
                 identifier: "red",
                 stats: &stats.red,
-                mapper: |e| e.hue_vector_field0 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field0 as f64),
             },
             Series {
                 identifier: "yellow",
                 stats: &stats.yellow,
-                mapper: |e| e.hue_vector_field1 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field1 as f64),
             },
             Series {
                 identifier: "green",
                 stats: &stats.green,
-                mapper: |e| e.hue_vector_field2 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field2 as f64),
             },
             Series {
                 identifier: "cyan",
                 stats: &stats.cyan,
-                mapper: |e| e.hue_vector_field3 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field3 as f64),
             },
             Series {
                 identifier: "blue",
                 stats: &stats.blue,
-                mapper: |e| e.hue_vector_field4 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field4 as f64),
             },
             Series {
                 identifier: "magenta",
                 stats: &stats.magenta,
-                mapper: |e| e.hue_vector_field5 as f64,
+                mapper: |e| vector_normalize(e.hue_vector_field5 as f64),
             },
         ];
 
@@ -616,12 +628,12 @@ impl TrimParameter {
         stats: &'a SummaryTrimsStats,
     ) -> Series<'a, ExtMetadataBlockLevel2> {
         let mapper: fn(&ExtMetadataBlockLevel2) -> f64 = match self {
-            Self::Slope => |e| e.trim_slope as f64,
-            Self::Offset => |e| e.trim_offset as f64,
-            Self::Power => |e| e.trim_power as f64,
-            Self::Chroma => |e| e.trim_chroma_weight as f64,
-            Self::Saturation => |e| e.trim_saturation_gain as f64,
-            Self::MS => |e| e.ms_weight as f64,
+            Self::Slope => |e| trims_normalize(e.trim_slope as f64),
+            Self::Offset => |e| trims_normalize(e.trim_offset as f64),
+            Self::Power => |e| trims_normalize(e.trim_power as f64),
+            Self::Chroma => |e| trims_normalize(e.trim_chroma_weight as f64),
+            Self::Saturation => |e| trims_normalize(e.trim_saturation_gain as f64),
+            Self::MS => |e| trims_normalize(e.ms_weight as f64),
             _ => unreachable!(),
         };
 
@@ -637,14 +649,14 @@ impl TrimParameter {
         stats: &'a SummaryTrimsStats,
     ) -> Series<'a, ExtMetadataBlockLevel8> {
         let mapper: fn(&ExtMetadataBlockLevel8) -> f64 = match self {
-            Self::Slope => |e| e.trim_slope as f64,
-            Self::Offset => |e| e.trim_offset as f64,
-            Self::Power => |e| e.trim_power as f64,
-            Self::Chroma => |e| e.trim_chroma_weight as f64,
-            Self::Saturation => |e| e.trim_saturation_gain as f64,
-            Self::MS => |e| e.ms_weight as f64,
-            Self::Mid => |e| e.target_mid_contrast as f64,
-            Self::Clip => |e| e.clip_trim as f64,
+            Self::Slope => |e| trims_normalize(e.trim_slope as f64),
+            Self::Offset => |e| trims_normalize(e.trim_offset as f64),
+            Self::Power => |e| trims_normalize(e.trim_power as f64),
+            Self::Chroma => |e| trims_normalize(e.trim_chroma_weight as f64),
+            Self::Saturation => |e| trims_normalize(e.trim_saturation_gain as f64),
+            Self::MS => |e| trims_normalize(e.ms_weight as f64),
+            Self::Mid => |e| trims_normalize(e.target_mid_contrast as f64),
+            Self::Clip => |e| trims_normalize(e.clip_trim as f64),
         };
 
         Series {
@@ -655,11 +667,100 @@ impl TrimParameter {
     }
 }
 
-impl From<PlotType> for PlotCoord {
-    fn from(plot_type: PlotType) -> Self {
-        match plot_type {
-            PlotType::L1 => Self {
-                key_points: vec![
+impl Ranged for PlotCoord {
+    type FormatOption = NoDefaultFormatting;
+    type ValueType = f64;
+
+    fn map(&self, input: &f64, limit: (i32, i32)) -> i32 {
+        let norm = (*input - self.range.start) / (self.range.end - self.range.start);
+
+        let size = limit.1 - limit.0;
+        (norm * size as f64).round() as i32 + limit.0
+    }
+
+    fn key_points<Hint: KeyPointHint>(&self, _hint: Hint) -> Vec<f64> {
+        self.key_points.clone()
+    }
+
+    // For some reason this is never called...
+    fn range(&self) -> Range<f64> {
+        self.range.clone()
+    }
+}
+
+impl ValueFormatter<f64> for PlotCoord {
+    fn format_ext(&self, value: &f64) -> String {
+        let res = match self.plot_type {
+            PlotType::L1 => (pq_to_nits(*value) * 1000.0).round() / 1000.0,
+            PlotType::L2 | PlotType::L8 => (*value * L2_L8_TRIMS_STATS_MAX).round(),
+            PlotType::L8Saturation | PlotType::L8Hue => (*value * L2_L8_VEC_STATS_MAX).round(),
+        };
+
+        res.to_string()
+    }
+}
+
+impl PlotCoord {
+    fn new(plot_type: PlotType, summary: &RpusListSummary) -> Self {
+        let range = match plot_type {
+            PlotType::L1 => 0.0..summary.l1_stats.max_pq_value,
+            PlotType::L2 | PlotType::L8 => {
+                let (min, max) = match plot_type {
+                    PlotType::L2 => summary.l2_stats.as_ref().unwrap().global_min_max(),
+                    PlotType::L8 => summary.l8_stats_trims.as_ref().unwrap().global_min_max(),
+                    _ => unreachable!(),
+                };
+                let (min, max) = (trims_normalize(min), trims_normalize(max));
+
+                if min == 0.5 && min == max {
+                    0.25..0.75
+                } else {
+                    min..max
+                }
+            }
+            PlotType::L8Saturation | PlotType::L8Hue => {
+                let (min, max) = match plot_type {
+                    PlotType::L8Saturation => summary
+                        .l8_stats_saturation
+                        .as_ref()
+                        .unwrap()
+                        .global_min_max(),
+                    PlotType::L8Hue => summary.l8_stats_hue.as_ref().unwrap().global_min_max(),
+                    _ => unreachable!(),
+                };
+                let (min, max) = (vector_normalize(min), vector_normalize(max));
+
+                if min == 0.5 && min == max {
+                    0.25..0.75
+                } else {
+                    min..max
+                }
+            }
+        };
+
+        let mut key_points = match plot_type {
+            PlotType::L1 => {
+                let min_distance = 0.04;
+                let midpoint = nits_to_pq(100.0);
+
+                let overhead_range = midpoint..range.end;
+                let mut key_points = overhead_range
+                    .clone()
+                    .step(min_distance)
+                    .key_points(LightPoints::new(0, 12));
+
+                key_points.retain(|e| {
+                    (e - overhead_range.start).abs() >= min_distance
+                        && (overhead_range.end - e).abs() >= min_distance
+                });
+
+                // make calculated keypoints round nits
+                key_points.push(range.end);
+                key_points
+                    .iter_mut()
+                    .for_each(|e| *e = nits_to_pq(pq_to_nits(*e).round()));
+
+                key_points.extend(&[
                     nits_to_pq(0.01),
                     nits_to_pq(0.1),
                     nits_to_pq(0.5),
@@ -669,70 +770,38 @@ impl From<PlotType> for PlotCoord {
                     nits_to_pq(10.0),
                     nits_to_pq(25.0),
                     nits_to_pq(50.0),
-                    nits_to_pq(100.0),
-                    nits_to_pq(200.0),
-                    nits_to_pq(400.0),
-                    nits_to_pq(600.0),
-                    nits_to_pq(1000.0),
-                    nits_to_pq(2000.0),
-                    nits_to_pq(4000.0),
-                    nits_to_pq(10000.0),
-                ],
-                range: 0_f64..1.0_f64,
-                mapper: |value, limit| {
-                    let size = limit.1 - limit.0;
-                    (*value * size as f64) as i32 + limit.0
-                },
-                formatter: |value| {
-                    let nits = (pq_to_nits(*value) * 1000.0).round() / 1000.0;
-                    format!("{nits}")
-                },
-            },
-            PlotType::L2 | PlotType::L8 => Self {
-                key_points: vec![
-                    0.0, 512.0, 1024.0, 1536.0, 2048.0, 2560.0, 3072.0, 3584.0, 4096.0,
-                ],
-                range: 0_f64..4096.0_f64,
-                mapper: |value, limit| {
-                    let norm = value / 4096.0;
-                    let size = limit.1 - limit.0;
-                    (norm * size as f64).round() as i32 + limit.0
-                },
-                formatter: |value| format!("{value}"),
-            },
-            PlotType::L8Saturation | PlotType::L8Hue => Self {
-                key_points: vec![0.0, 32.0, 64.0, 96.0, 128.0, 160.0, 192.0, 224.0, 256.0],
-                range: 0_f64..256.0_f64,
-                mapper: |value, limit| {
-                    let norm = value / 256.0;
-                    let size = limit.1 - limit.0;
-                    (norm * size as f64).round() as i32 + limit.0
-                },
-                formatter: |value| format!("{value}"),
-            },
+                    midpoint,
+                ]);
+
+                key_points
+            }
+            _ => {
+                let midpoint = 0.5;
+                let min_distance = range.end * 0.01;
+                let mut key_points = range
+                    .clone()
+                    .step(min_distance)
+                    .key_points(LightPoints::new(0, 10));
+
+                key_points.retain(|e| {
+                    (e - range.start).abs() >= min_distance
+                        && (range.end - e).abs() >= min_distance
+                        && (e - midpoint).abs() >= min_distance
+                });
+
+                key_points.extend(&[range.start, range.end, 0.5]);
+
+                key_points
+            }
+        };
+
+        key_points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        key_points.dedup();
+
+        Self {
+            plot_type,
+            key_points,
+            range,
         }
-    }
-}
-
-impl Ranged for PlotCoord {
-    type FormatOption = NoDefaultFormatting;
-    type ValueType = f64;
-
-    fn map(&self, value: &f64, limit: (i32, i32)) -> i32 {
-        (self.mapper)(value, limit)
-    }
-
-    fn key_points<Hint: KeyPointHint>(&self, _hint: Hint) -> Vec<f64> {
-        self.key_points.clone()
-    }
-
-    fn range(&self) -> Range<f64> {
-        self.range.clone()
-    }
-}
-
-impl ValueFormatter<f64> for PlotCoord {
-    fn format_ext(&self, value: &f64) -> String {
-        (self.formatter)(value)
     }
 }
